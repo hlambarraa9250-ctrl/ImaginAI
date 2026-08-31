@@ -116,12 +116,17 @@ def _split_text_into_chunks(text: str, max_chars: int = 100) -> list[str]:
 
 # ── Retry helper ─────────────────────────────────────────────────────────────
 
+def _is_rate_limited(error: Exception) -> bool:
+    text = str(error).lower()
+    return any(marker in text for marker in ("429", "rate limit", "quota", "resource exhausted", "too many requests"))
+
+
 async def _retry_async(coro_fn, max_retries: int = 2, base_delay: float = 1.5):
     for attempt in range(max_retries):
         try:
             return await coro_fn()
         except Exception as e:
-            if attempt == max_retries - 1:
+            if attempt == max_retries - 1 or not _is_rate_limited(e):
                 raise
             delay = base_delay * (2 ** attempt)
             print(f"[TTS] Attempt {attempt + 1} failed: {e}. Retrying in {delay}s...")
@@ -260,7 +265,9 @@ async def _generate_gemini(text: str, output_path: str, voice: str, device_id: s
                 break
         except Exception as err:
             last_error = err
-            print(f"[Gemini TTS WARNING] Key {idx + 1} failed ({err}). Trying failover key...")
+            if not _is_rate_limited(err):
+                raise RuntimeError(f"Gemini TTS generation failed: {err}") from err
+            print(f"[Gemini TTS WARNING] Key {idx + 1} is rate limited. Trying bounded failover...")
 
     if not response:
         raise RuntimeError(f"All Gemini API keys failed for TTS generation! Last error: {last_error}")

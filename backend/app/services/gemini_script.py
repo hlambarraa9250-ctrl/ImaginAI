@@ -16,13 +16,18 @@ from app.models import GeneratedScript, ScriptScene
 
 # ── Retry helper ─────────────────────────────────────────────────────────────
 
+def _is_rate_limited(error: Exception) -> bool:
+    text = str(error).lower()
+    return any(marker in text for marker in ("429", "rate limit", "quota", "resource exhausted", "too many requests"))
+
+
 async def _retry_async(coro_fn, max_retries: int = 3, base_delay: float = 2.0):
-    """Call an async function with exponential backoff."""
+    """Retry only transient rate limits, with a strict upper bound."""
     for attempt in range(max_retries):
         try:
             return await coro_fn()
         except Exception as e:
-            if attempt == max_retries - 1:
+            if attempt == max_retries - 1 or not _is_rate_limited(e):
                 raise
             delay = base_delay * (2 ** attempt)
             print(f"[Script] Attempt {attempt + 1} failed: {e}. Retrying in {delay}s...")
@@ -228,7 +233,9 @@ async def generate_script(
                 break
         except Exception as err:
             last_error = err
-            print(f"[Gemini Script WARNING] Key {idx + 1} failed ({err}). Trying failover key...")
+            if not _is_rate_limited(err):
+                raise RuntimeError(f"Gemini script generation failed: {err}") from err
+            print(f"[Gemini Script WARNING] Key {idx + 1} is rate limited. Trying bounded failover...")
 
     if not raw:
         raise RuntimeError(f"All Gemini API keys failed for script generation! Last error: {last_error}")
@@ -306,6 +313,8 @@ Rules:
                 break
         except Exception as err:
             last_error = err
+            if not _is_rate_limited(err):
+                raise RuntimeError(f"Gemini scene expansion failed: {err}") from err
 
     if not raw:
         raise RuntimeError(f"Failed to expand script scenes: {last_error}")

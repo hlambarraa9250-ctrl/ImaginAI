@@ -1,0 +1,1 @@
+- [Next.js workspace dependency layout](next-workspace-dependencies.md) — Keep Turbopack rooted in frontend with dependencies physically inside that root.

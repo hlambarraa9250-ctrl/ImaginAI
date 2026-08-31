@@ -54,7 +54,10 @@ def _set_stage(job_id: str, stage: str, state: str) -> None:
 
 
 def _validate_final_video(path: str) -> float:
-    """Require a real MP4 with both streams, dimensions, and positive duration."""
+    """Require a non-empty 1920x1080 MP4 with valid video/audio streams."""
+    output = Path(path)
+    if not output.is_file() or output.stat().st_size <= 0:
+        raise RuntimeError("Final video validation failed: output file is missing or empty.")
     result = subprocess.run(
         [
             "ffprobe", "-v", "error", "-print_format", "json",
@@ -69,7 +72,13 @@ def _validate_final_video(path: str) -> float:
     video = next((s for s in streams if s.get("codec_type") == "video"), None)
     audio = next((s for s in streams if s.get("codec_type") == "audio"), None)
     duration = float(payload.get("format", {}).get("duration") or 0)
-    if not video or not audio or not video.get("width") or not video.get("height") or duration <= 0:
+    if (
+        not video
+        or not audio
+        or video.get("width") != 1920
+        or video.get("height") != 1080
+        or duration <= 0
+    ):
         raise RuntimeError("Final video validation failed: output must contain valid video and audio streams.")
     return duration
 

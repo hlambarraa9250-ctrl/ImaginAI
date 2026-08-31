@@ -1,5 +1,6 @@
 import json
 import uuid
+import shutil
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
@@ -53,6 +54,8 @@ from contextlib import asynccontextmanager
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     init_db()
+    if not shutil.which("ffmpeg") or not shutil.which("ffprobe"):
+        raise RuntimeError("FFmpeg and ffprobe are required in the runtime.")
     # Jobs cannot continue executing after a process restart. Mark only jobs
     # that were actively running as interrupted; review/approval states remain
     # resumable and are intentionally left untouched.

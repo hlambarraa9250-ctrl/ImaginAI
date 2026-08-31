@@ -5,10 +5,12 @@ Integrates with Fish Audio API (https://api.fish.audio) for voice listing and te
 
 import os
 import tempfile
+import subprocess
+import json
 import httpx # type: ignore
 from pathlib import Path
 from app.config import get_fish_audio_key
-from app.services.gemini_tts import _clean_text, _convert_to_wav, _save_wav
+from app.services.gemini_tts import _clean_text, _convert_to_wav, _save_wav, get_audio_duration_ffprobe
 
 FISH_AUDIO_BASE_URL = "https://api.fish.audio/v1"
 
@@ -130,8 +132,7 @@ async def generate_speech_fish_audio(
         )
 
         if response.status_code != 200:
-            err_detail = response.text[:200]
-            raise RuntimeError(f"Fish Audio API error (HTTP {response.status_code}): {err_detail}")
+            raise RuntimeError(f"Fish Audio API error (HTTP {response.status_code}).")
 
         audio_bytes = response.content
         if not audio_bytes or len(audio_bytes) < 100:
@@ -167,12 +168,36 @@ async def clone_voice_fish_audio(
 
     api_key = get_fish_audio_key(device_id=device_id) # Will raise error if key missing
 
+    # MediaRecorder commonly sends WebM/Opus bytes even when a browser-side
+    # File is named .wav. Normalize all uploads to a real PCM WAV and verify
+    # it with ffprobe before sending it to the private Fish Audio model.
+    input_suffix = Path(filename or "").suffix.lower() or ".bin"
+    temp_input = tempfile.NamedTemporaryFile(delete=False, suffix=input_suffix).name
+    temp_wav = tempfile.NamedTemporaryFile(delete=False, suffix=".wav").name
+    try:
+        Path(temp_input).write_bytes(audio_bytes)
+        _convert_to_wav(temp_input, temp_wav)
+        duration = get_audio_duration_ffprobe(temp_wav)
+        if duration <= 0 or duration > 120:
+            raise ValueError("يجب أن يكون التسجيل الصوتي صالحاً ومدته أقل من دقيقتين.")
+        wav_bytes = Path(temp_wav).read_bytes()
+        if len(wav_bytes) < 1000 or wav_bytes[:4] != b"RIFF":
+            raise ValueError("تعذر تحويل التسجيل إلى WAV صالح.")
+    except subprocess.CalledProcessError:
+        raise ValueError("تعذر تحويل التسجيل الصوتي. يرجى رفع WAV أو WebM/Opus صالح.")
+    finally:
+        for temp_path in (temp_input, temp_wav):
+            try:
+                Path(temp_path).unlink(missing_ok=True)
+            except Exception:
+                pass
+
     headers = {
         "Authorization": f"Bearer {api_key}",
     }
 
     files = {
-        "voices": (filename or "voice_sample.wav", audio_bytes, "audio/mpeg" if filename.endswith(".mp3") else "audio/wav"),
+        "voices": ("voice_sample.wav", wav_bytes, "audio/wav"),
     }
     data = {
         "title": voice_name or "صوت مخصص",
@@ -190,13 +215,12 @@ async def clone_voice_fish_audio(
         )
 
         if response.status_code not in (200, 201):
-            err_text = response.text[:250]
-            raise RuntimeError(f"خطأ من API استنساخ الصوت في Fish Audio (HTTP {response.status_code}): {err_text}")
+            raise RuntimeError(f"خطأ من API استنساخ الصوت في Fish Audio (HTTP {response.status_code}).")
 
         res_json = response.json()
         fish_voice_id = res_json.get("_id") or res_json.get("id")
         if not fish_voice_id:
-            raise RuntimeError(f"لم يتم إرجاع المعرف (fish_voice_id) بنجاح: {res_json}")
+            raise RuntimeError("لم يتم إرجاع معرف الصوت المستنسخ من Fish Audio.")
 
         print(f"[Fish Audio Clone SUCCESS] Created cloned model ID: {fish_voice_id} for '{voice_name}'")
         return str(fish_voice_id)
