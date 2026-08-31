@@ -16,7 +16,7 @@ from pathlib import Path
 
 import httpx
 
-from app.config import get_pexels_key, get_pixabay_key, STYLE_MAX_SHOT_DURATION
+from app.config import get_pexels_key, get_pixabay_key, get_nasa_key, STYLE_MAX_SHOT_DURATION
 from app.models import ScriptScene
 
 
@@ -74,16 +74,16 @@ def _is_landscape(path: str) -> bool:
         if height > width:
             print(f"[Footage] Rejected vertical video: {width}x{height} for {path}")
             return False
-    return True
+    return width > 0 and height > 0 and height <= width
 
 
 # ── Pexels search ───────────────────────────────────────────────────────────
 
-async def _search_pexels(keywords: list[str], min_duration: float, client: httpx.AsyncClient) -> list[dict]:
+async def _search_pexels(keywords: list[str], min_duration: float, client: httpx.AsyncClient, device_id: str | None = None) -> list[dict]:
     """Search Pexels Videos API with orientation=landscape. Returns candidate video list."""
     query = " ".join(keywords[:3])
     url = "https://api.pexels.com/videos/search"
-    headers = {"Authorization": get_pexels_key()}
+    headers = {"Authorization": get_pexels_key(device_id=device_id)}
     params = {
         "query": query,
         "per_page": 10,
@@ -119,7 +119,7 @@ async def _search_pexels(keywords: list[str], min_duration: float, client: httpx
 
 # ── Pixabay search (with caching) ───────────────────────────────────────────
 
-async def _search_pixabay(keywords: list[str], min_duration: float, client: httpx.AsyncClient) -> list[dict]:
+async def _search_pixabay(keywords: list[str], min_duration: float, client: httpx.AsyncClient, device_id: str | None = None) -> list[dict]:
     """Search Pixabay Videos API with orientation=horizontal and 24h caching."""
     query = " ".join(keywords[:3])
     cache_key = query.lower().strip()
@@ -133,7 +133,7 @@ async def _search_pixabay(keywords: list[str], min_duration: float, client: http
 
     url = "https://pixabay.com/api/videos/"
     params = {
-        "key": get_pixabay_key(),
+        "key": get_pixabay_key(device_id=device_id),
         "q": query,
         "per_page": 10,
         "safesearch": "true",
@@ -170,11 +170,11 @@ async def _search_pixabay(keywords: list[str], min_duration: float, client: http
 
 # ── Pixabay Images search (with caching) ───────────────────────────────────
 
-async def _search_pexels_images(keywords: list[str], client: httpx.AsyncClient) -> list[dict]:
+async def _search_pexels_images(keywords: list[str], client: httpx.AsyncClient, device_id: str | None = None) -> list[dict]:
     """Search Pexels Photos API with orientation=landscape."""
     query = " ".join(keywords[:3])
     url = "https://api.pexels.com/v1/search"
-    headers = {"Authorization": get_pexels_key()}
+    headers = {"Authorization": get_pexels_key(device_id=device_id)}
     params = {
         "query": query,
         "per_page": 10,
@@ -205,7 +205,7 @@ async def _search_pexels_images(keywords: list[str], client: httpx.AsyncClient) 
     return results
 
 
-async def _search_pixabay_images(keywords: list[str], client: httpx.AsyncClient) -> list[dict]:
+async def _search_pixabay_images(keywords: list[str], client: httpx.AsyncClient, device_id: str | None = None) -> list[dict]:
     """Search Pixabay Photos API with orientation=horizontal and 24h caching."""
     query = " ".join(keywords[:3])
     cache_key = f"img_{query.lower().strip()}"
@@ -218,7 +218,7 @@ async def _search_pixabay_images(keywords: list[str], client: httpx.AsyncClient)
 
     url = "https://pixabay.com/api/"
     params = {
-        "key": get_pixabay_key(),
+        "key": get_pixabay_key(device_id=device_id),
         "q": query,
         "per_page": 10,
         "safesearch": "true",
@@ -451,10 +451,13 @@ async def _search_nasa(keywords: list[str], client: httpx.AsyncClient) -> list[d
     return results
 
 
-async def _search_nasa_apod(client: httpx.AsyncClient) -> list[dict]:
+async def _search_nasa_apod(client: httpx.AsyncClient, device_id: str | None = None) -> list[dict]:
     """Fetch NASA APOD (Astronomy Picture of the Day)."""
     import os
-    nasa_key = os.getenv("NASA_API_KEY", "DEMO_KEY")
+    try:
+        nasa_key = get_nasa_key(device_id=device_id)
+    except RuntimeError:
+        nasa_key = "DEMO_KEY"
     url = "https://api.nasa.gov/planetary/apod"
     params = {"api_key": nasa_key}
     results = []
@@ -488,12 +491,19 @@ async def _download_video(url: str, output_path: str, client: httpx.AsyncClient,
     }
     
     last_err = None
-    for attempt in range(1, max_retries + 1):
+    for attempt in range(1, min(max_retries, 3) + 1):
         try:
             async with client.stream("GET", url, headers=headers, timeout=90, follow_redirects=True) as resp:
                 resp.raise_for_status()
+                content_length = int(resp.headers.get("content-length", "0") or 0)
+                if content_length > 350 * 1024 * 1024:
+                    raise RuntimeError("Downloaded media exceeds the 350 MB safety limit.")
+                total = 0
                 with open(output_path, "wb") as f:
                     async for chunk in resp.aiter_bytes(chunk_size=16384):
+                        total += len(chunk)
+                        if total > 350 * 1024 * 1024:
+                            raise RuntimeError("Downloaded media exceeds the 350 MB safety limit.")
                         f.write(chunk)
             print(f"[Footage] Downloaded to {output_path} (attempt {attempt})")
             return
@@ -521,60 +531,46 @@ async def fetch_footage_for_shot(
     attr_path: str,
     client: httpx.AsyncClient,
     used_urls: set[str],
+    source_priority: list[str] | None = None,
+    device_id: str | None = None,
 ) -> str:
-    """Fetch clip: Pexels Video -> Pixabay Video -> Pexels Image -> Pixabay Image fallback."""
-    # 1. Pexels Video
-    candidates = await _search_pexels(keywords, min_duration, client)
-
-    # 2. Pixabay Video
-    if not candidates:
-        print(f"[Footage] Pexels video had no results for {keywords}, trying Pixabay video...")
-        candidates = await _search_pixabay(keywords, min_duration, client)
-
-    # 3. Pexels Image Fallback
-    if not candidates:
-        print(f"[Footage] No video found for {keywords}, trying Pexels image fallback...")
-        candidates = await _search_pexels_images(keywords, client)
-
-    # 4. Pixabay Image Fallback
-    if not candidates:
-        print(f"[Footage] No Pexels image found for {keywords}, trying Pixabay image fallback...")
-        candidates = await _search_pixabay_images(keywords, client)
-
-    # 5. Wikimedia Commons Fallback
-    if not candidates:
-        print(f"[Footage] Trying Wikimedia Commons fallback for {keywords}...")
-        candidates = await _search_wikimedia(keywords, client)
-
-    # 6. Archive.org Fallback
-    if not candidates:
-        print(f"[Footage] Trying Archive.org fallback for {keywords}...")
-        candidates = await _search_archive_org(keywords, client)
-
-    # 7. Library of Congress (LOC) Fallback
-    if not candidates:
-        print(f"[Footage] Trying Library of Congress (LOC) fallback for {keywords}...")
-        candidates = await _search_loc(keywords, client)
-
-    # 8. NASA Media Fallback
-    if not candidates:
-        print(f"[Footage] Trying NASA Media API fallback for {keywords}...")
-        candidates = await _search_nasa(keywords, client)
-
-    # 9. NASA APOD Fallback
-    if not candidates:
-        print(f"[Footage] Trying NASA APOD fallback for {keywords}...")
-        candidates = await _search_nasa_apod(client)
+    """Fetch one validated horizontal asset using the niche's source priority."""
+    searchers = {
+        "pexels_video": lambda: _search_pexels(keywords, min_duration, client, device_id),
+        "pixabay_video": lambda: _search_pixabay(keywords, min_duration, client, device_id),
+        "pexels_image": lambda: _search_pexels_images(keywords, client, device_id),
+        "pixabay_image": lambda: _search_pixabay_images(keywords, client, device_id),
+        "wikimedia": lambda: _search_wikimedia(keywords, client),
+        "archive_org": lambda: _search_archive_org(keywords, client),
+        "loc": lambda: _search_loc(keywords, client),
+        "nasa": lambda: _search_nasa(keywords, client),
+        "nasa_apod": lambda: _search_nasa_apod(client, device_id),
+    }
+    priority = source_priority or [
+        "pexels_video", "pixabay_video", "pexels_image", "pixabay_image",
+        "wikimedia", "archive_org", "loc", "nasa", "nasa_apod",
+    ]
+    candidates = []
+    for source in priority:
+        searcher = searchers.get(source)
+        if not searcher:
+            continue
+        try:
+            candidates = await searcher()
+        except Exception as exc:
+            print(f"[Footage] Source '{source}' unavailable: {exc}")
+        if candidates:
+            break
 
     # 10. Single broader keyword fallbacks
     if not candidates:
         for kw in keywords:
-            candidates = await _search_pexels([kw], min_duration, client)
+            candidates = await _search_pexels([kw], min_duration, client, device_id)
             if candidates:
                 break
         if not candidates:
             for kw in keywords:
-                candidates = await _search_pexels_images([kw], client)
+                candidates = await _search_pexels_images([kw], client, device_id)
                 if candidates:
                     break
 
@@ -598,8 +594,8 @@ async def fetch_footage_for_shot(
         try:
             await _download_video(cand["download_url"], target_path, client)
             
-            # Post-download verification via ffprobe (skip height check for images if valid)
-            if not is_image and not _is_landscape(target_path):
+            # Every downloaded asset must be a real, probeable horizontal file.
+            if not _is_landscape(target_path):
                 print(f"[Footage] Clip was not landscape ({target_path}), trying next candidate...")
                 Path(target_path).unlink(missing_ok=True)
                 continue
@@ -615,23 +611,9 @@ async def fetch_footage_for_shot(
             continue
 
     if not downloaded_successfully or not chosen:
-        print(f"[Footage] All download candidates failed for {keywords}. Generating local emergency dark frame...")
-        fallback_img = str(Path(output_path).with_suffix(".jpg"))
-        try:
-            subprocess.run(
-                ["ffmpeg", "-y", "-f", "lavfi", "-i", "color=c=0x0f172a:s=1920x1080:d=1", "-vframes", "1", fallback_img],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                check=True,
-            )
-            final_output_path = fallback_img
-            chosen = {
-                "source": "imaginAI local fallback",
-                "attribution": "Generated by imaginAI",
-                "is_image": True,
-            }
-        except Exception as ff_err:
-            raise RuntimeError(f"All candidates and local fallback generation failed: {ff_err}")
+        raise RuntimeError(
+            f"All configured footage sources returned invalid or unavailable media for keywords: {keywords}"
+        )
 
     # Save attribution
     attr_data = {
@@ -653,6 +635,8 @@ async def fetch_all_footage(
     audio_durations: list[float],
     job_dir: Path,
     style: str = "documentary",
+    niche_id: str | None = None,
+    device_id: str | None = None,
 ) -> list[list[str]]:
     """
     Fetch footage for all scenes, splitting long scenes into multiple shots
@@ -665,6 +649,12 @@ async def fetch_all_footage(
     max_shot_dur = STYLE_MAX_SHOT_DURATION.get(style, 10.0)
     all_scene_shots: list[list[str]] = []
     used_urls: set[str] = set()
+    source_priority = None
+    if niche_id:
+        from app.niches import find_niche_info
+        niche_info = find_niche_info(niche_id)
+        if niche_info:
+            source_priority = [item.strip() for item in niche_info.get("sources", "").split(",") if item.strip()]
 
     async with httpx.AsyncClient() as client:
         for scene_idx, scene in enumerate(scenes):
@@ -689,15 +679,17 @@ async def fetch_all_footage(
                     # Rotate or modify keywords slightly for different shots
                     kw = kw[shot_idx % len(kw):] + kw[:shot_idx % len(kw)]
 
-                await fetch_footage_for_shot(
+                resolved_output = await fetch_footage_for_shot(
                     keywords=kw,
                     min_duration=shot_target_dur,
                     output_path=output,
                     attr_path=attr,
                     client=client,
                     used_urls=used_urls,
+                    source_priority=source_priority,
+                    device_id=device_id,
                 )
-                scene_clip_paths.append(output)
+                scene_clip_paths.append(resolved_output)
 
                 if shot_idx < num_shots - 1:
                     await asyncio.sleep(0.3)

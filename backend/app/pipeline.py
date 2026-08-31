@@ -7,6 +7,7 @@ for all timing throughout the pipeline.
 
 import json
 import traceback
+import subprocess
 from pathlib import Path
 
 from app.config import JOBS_DIR
@@ -52,10 +53,32 @@ def _set_stage(job_id: str, stage: str, state: str) -> None:
     path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
+def _validate_final_video(path: str) -> float:
+    """Require a real MP4 with both streams, dimensions, and positive duration."""
+    result = subprocess.run(
+        [
+            "ffprobe", "-v", "error", "-print_format", "json",
+            "-show_streams", "-show_format", path,
+        ],
+        capture_output=True, text=True, timeout=30,
+    )
+    if result.returncode != 0:
+        raise RuntimeError("Final video validation failed: ffprobe could not read the output.")
+    payload = json.loads(result.stdout)
+    streams = payload.get("streams", [])
+    video = next((s for s in streams if s.get("codec_type") == "video"), None)
+    audio = next((s for s in streams if s.get("codec_type") == "audio"), None)
+    duration = float(payload.get("format", {}).get("duration") or 0)
+    if not video or not audio or not video.get("width") or not video.get("height") or duration <= 0:
+        raise RuntimeError("Final video validation failed: output must contain valid video and audio streams.")
+    return duration
+
+
 TARGET_DURATION_SECONDS = {
     "5_min": 300.0,
     "8_min": 480.0,
     "10_min": 600.0,
+    "15_min": 900.0,
     "short": 300.0,
     "medium": 480.0,
 }
@@ -124,6 +147,7 @@ async def run_pipeline(
                 niche_id=niche_id,
                 custom_niche=custom_niche,
                 additional_context=additional_context,
+                device_id=device_id,
             )
         _set_stage(job_id, "script", "done")
 
@@ -134,7 +158,7 @@ async def run_pipeline(
 
         if not fixed_overlay:
             from app.services.gemini_section_analyzer import analyze_script_sections
-            proposal = await analyze_script_sections([s.model_dump() for s in script.scenes], idea=idea)
+            proposal = await analyze_script_sections([s.model_dump() for s in script.scenes], idea=idea, device_id=device_id)
             if proposal.get("should_split") and proposal.get("sections"):
                 proposal_file = job_dir / "section_proposal.json"
                 proposal_file.write_text(json.dumps(proposal, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -173,7 +197,7 @@ async def run_pipeline(
         _set_stage(job_id, "tts", "processing")
         from app.services.gemini_tts import generate_all_speech, get_audio_duration_ffprobe
         audio_paths = await generate_all_speech(
-            script.scenes, job_dir, voice=voice, provider=voice_provider
+            script.scenes, job_dir, voice=voice, provider=voice_provider, device_id=device_id
         )
 
         # ── Measure real durations via ffprobe ───────────────────────────
@@ -200,6 +224,8 @@ async def run_pipeline(
                 current_scenes_count=len(script.scenes),
                 style=style,
                 job_dir=job_dir,
+                niche_id=niche_id,
+                device_id=device_id,
             )
 
             if not new_scenes:
@@ -211,7 +237,7 @@ async def run_pipeline(
 
             # Generate speech for NEW scenes only
             new_audio_paths = await generate_all_speech(
-                new_scenes, job_dir, voice=voice, provider=voice_provider, start_index=existing_count
+                new_scenes, job_dir, voice=voice, provider=voice_provider, start_index=existing_count, device_id=device_id
             )
             audio_paths.extend(new_audio_paths)
 
@@ -234,7 +260,7 @@ async def run_pipeline(
         _set_stage(job_id, "footage", "processing")
         from app.services.footage import fetch_all_footage
         shots_per_scene = await fetch_all_footage(
-            script.scenes, audio_durations, job_dir, style
+            script.scenes, audio_durations, job_dir, style, niche_id=niche_id, device_id=device_id
         )
         _set_stage(job_id, "footage", "done")
 
@@ -307,6 +333,20 @@ async def resume_pipeline(
     job_id: str,
     edited_scenes: list[dict],
 ) -> None:
+    try:
+        await _resume_pipeline_impl(job_id, edited_scenes)
+    except Exception as e:
+        traceback.print_exc()
+        user_msg = _format_user_friendly_error(e)
+        from app.db import update_video
+        update_video(video_id=job_id, status="failed")
+        _update_status(job_id, status="failed", error=user_msg)
+
+
+async def _resume_pipeline_impl(
+    job_id: str,
+    edited_scenes: list[dict],
+) -> None:
     """
     Resume pipeline after user review & edits.
     1. Re-generate TTS only for scenes where narration text changed.
@@ -361,7 +401,7 @@ async def resume_pipeline(
         if new_narration != old_narration:
             print(f"[Resume Pipeline] Scene {idx} narration edited. Regenerating speech...")
             new_audio_paths = await generate_all_speech(
-                [scene_obj], job_dir, voice=voice, provider=voice_provider, start_index=idx
+                [scene_obj], job_dir, voice=voice, provider=voice_provider, start_index=idx, device_id=device_id
             )
             if new_audio_paths and len(new_audio_paths) > 0:
                 audio_paths[idx] = new_audio_paths[0]
@@ -372,7 +412,7 @@ async def resume_pipeline(
         # ── Stage 4: Captions ────────────────────────────────────────────
         _set_stage(job_id, "captions", "processing")
         from app.services.captions import transcribe_all
-        caption_data = await transcribe_all(audio_paths, job_dir, scenes=script_scenes)
+        caption_data = await transcribe_all(audio_paths, job_dir, scenes=script_scenes, device_id=device_id)
         _set_stage(job_id, "captions", "done")
 
         # ── Stage 5: Render ──────────────────────────────────────────────
@@ -395,7 +435,7 @@ async def resume_pipeline(
         if not out_file.exists() or out_file.stat().st_size == 0:
             raise RuntimeError("Final video rendering failed: Output file does not exist or is empty.")
 
-        final_video_dur = get_audio_duration_ffprobe(output_path)
+        final_video_dur = _validate_final_video(output_path)
         expected_audio_dur = sum(audio_durations)
         dur_diff = abs(final_video_dur - expected_audio_dur)
 
@@ -449,6 +489,17 @@ async def resume_pipeline(
 
 
 async def approve_sections_and_resume(job_id: str, apply_sections: bool) -> None:
+    try:
+        await _approve_sections_and_resume_impl(job_id, apply_sections)
+    except Exception as e:
+        traceback.print_exc()
+        user_msg = _format_user_friendly_error(e)
+        from app.db import update_video
+        update_video(video_id=job_id, status="failed")
+        _update_status(job_id, status="failed", error=user_msg)
+
+
+async def _approve_sections_and_resume_impl(job_id: str, apply_sections: bool) -> None:
     """
     Resume pipeline after user approves or declines dynamic section proposals.
     """
@@ -502,7 +553,7 @@ async def approve_sections_and_resume(job_id: str, apply_sections: bool) -> None
     _set_stage(job_id, "tts", "processing")
     from app.services.gemini_tts import generate_all_speech, get_audio_duration_ffprobe
     audio_paths = await generate_all_speech(
-        script.scenes, job_dir, voice=voice, provider=voice_provider
+            script.scenes, job_dir, voice=voice, provider=voice_provider, device_id=device_id
     )
     audio_durations = [get_audio_duration_ffprobe(p) for p in audio_paths]
 
@@ -510,7 +561,7 @@ async def approve_sections_and_resume(job_id: str, apply_sections: bool) -> None
     _set_stage(job_id, "footage", "processing")
     from app.services.footage import fetch_all_footage
     shots_per_scene = await fetch_all_footage(
-        script.scenes, audio_durations, job_dir, style
+            script.scenes, audio_durations, job_dir, style, niche_id=niche_id, device_id=device_id
     )
     _set_stage(job_id, "footage", "done")
 

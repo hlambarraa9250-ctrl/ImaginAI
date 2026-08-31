@@ -35,13 +35,13 @@ ANALYSIS_SCHEMA = {
 }
 
 
-async def analyze_script_sections(scenes: list[dict], idea: str = "") -> dict:
+async def analyze_script_sections(scenes: list[dict], idea: str = "", device_id: str | None = None) -> dict:
     """
     Analyze script scenes to determine if section titles/numbers are appropriate.
     Returns dict matching ANALYSIS_SCHEMA.
     """
     try:
-        api_key = get_gemini_key()
+        api_key = get_gemini_key(device_id=device_id)
     except Exception as e:
         print(f"[Section Analyzer Warning] Gemini API key issue: {e}. Skipping dynamic analysis.")
         return {"should_split": False, "reasoning": "No Gemini API key"}

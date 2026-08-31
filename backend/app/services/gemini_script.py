@@ -10,7 +10,7 @@ from pathlib import Path
 from google import genai  # type: ignore
 from google.genai import types  # type: ignore
 
-from app.config import get_gemini_key, get_gemini_keys, GEMINI_SCRIPT_MODEL
+from app.config import get_gemini_keys, GEMINI_SCRIPT_MODEL
 from app.models import GeneratedScript, ScriptScene
 
 
@@ -186,6 +186,7 @@ async def generate_script(
     niche_id: str | None = None,
     custom_niche: str | None = None,
     additional_context: str | None = None,
+    device_id: str | None = None,
 ) -> GeneratedScript:
     """Generate a video script from the user's idea using Gemini."""
 
@@ -199,7 +200,7 @@ async def generate_script(
             f"معلومات إضافية ونقاط هامة يجب الاعتماد عليها والتركيز عليها بالفيديو:\n{additional_context.strip()}"
         )
 
-    keys = get_gemini_keys()
+    keys = get_gemini_keys(device_id=device_id)
     raw = None
     last_error = None
 
@@ -255,10 +256,18 @@ async def expand_script_scenes(
     current_scenes_count: int,
     style: str = "documentary",
     job_dir: Path = Path("."),
+    niche_id: str | None = None,
+    device_id: str | None = None,
 ) -> list[ScriptScene]:
     """Generate additional scenes to cover remaining needed seconds without rewriting existing script."""
     needed_words = max(150, int((needed_seconds / 60.0) * 150))
     style_instruction = STYLE_PROMPTS.get(style, STYLE_PROMPTS["documentary"])
+    niche_instruction = ""
+    if niche_id:
+        from app.niches import find_niche_info
+        niche_info = find_niche_info(niche_id)
+        if niche_info:
+            niche_instruction = f"\n- NICHE SPECIFIC INSTRUCTION: {niche_info.get('script_style', '')}"
 
     system = f"""You are a professional video script writer extending an existing script on the topic/idea.
 Rules:
@@ -267,10 +276,10 @@ Rules:
 - The additional narration MUST cover at least {needed_words} total words ({needed_seconds:.0f} seconds spoken duration).
 - The narration MUST be written in the EXACT SAME LANGUAGE as the user's idea.
 - Visual keywords must be in English.
-- {style_instruction}
+    - {style_instruction}{niche_instruction}
 """
 
-    keys = get_gemini_keys()
+    keys = get_gemini_keys(device_id=device_id)
     raw = None
     last_error = None
 

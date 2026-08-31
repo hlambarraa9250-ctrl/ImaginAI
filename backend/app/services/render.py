@@ -15,6 +15,7 @@ import json
 import os
 import subprocess
 import wave
+import re
 from pathlib import Path
 
 from app.config import STYLE_TRANSITION
@@ -50,6 +51,14 @@ def hex_to_ass_color(hex_str: str, alpha: str = "00") -> str:
     return f"&H{alpha}FFFFFF"
 
 
+def _escape_ass_text(value: str) -> str:
+    return value.replace("\\", "\\\\").replace("{", "\\{").replace("}", "\\}").replace("\n", "\\N")
+
+
+def _escape_drawtext(value: str) -> str:
+    return str(value).replace("\\", "\\\\").replace("'", "\\'").replace(":", "\\:")
+
+
 def _generate_ass_subtitles(
     caption_lines: list[dict], output_path: str, caption_config: dict | None = None
 ) -> str:
@@ -80,6 +89,7 @@ def _generate_ass_subtitles(
             fontname = "Cairo"
     else:
         fontname = font_raw or "Cairo"
+    fontname = re.sub(r"[^A-Za-z0-9\u0600-\u06FF _-]", "", str(fontname))[:80] or "Cairo"
 
     # Size
     size_percent = float(cfg.get("size_percent", 100))
@@ -164,7 +174,7 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
             # ASS Karaoke effect using \k tags
             dur_total = max(0.1, end_sec - start_sec)
             dur_per_word_cs = max(1, int((dur_total / len(words)) * 100))
-            k_words = [f"{{\\k{dur_per_word_cs}}}{w}" for w in words]
+            k_words = [f"{{\\k{dur_per_word_cs}}}{_escape_ass_text(w)}" for w in words]
             ass_text = " ".join(k_words)
             start_str = _format_time(start_sec)
             end_str = _format_time(end_sec)
@@ -183,9 +193,9 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
                 word_parts = []
                 for j, word_item in enumerate(words):
                     if j == i:
-                        word_parts.append(f"{{\\fscx130\\fscy130\\c{highlight_color}}}{word_item}{{\\r}}")
+                        word_parts.append(f"{{\\fscx130\\fscy130\\c{highlight_color}}}{_escape_ass_text(word_item)}{{\\r}}")
                     else:
-                        word_parts.append(word_item)
+                        word_parts.append(_escape_ass_text(word_item))
                 
                 ass_text = " ".join(word_parts)
                 events.append(f"Dialogue: 0,{start_str},{end_str},Default,,0,0,0,,{ass_text}")
@@ -193,7 +203,7 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
             # Standard static subtitles
             start_str = _format_time(start_sec)
             end_str = _format_time(end_sec)
-            text = text_raw.replace("\n", "\\N")
+            text = _escape_ass_text(text_raw)
             events.append(f"Dialogue: 0,{start_str},{end_str},Default,,0,0,0,,{text}")
 
     ass_content = header + "\n".join(events) + "\n"
@@ -288,6 +298,10 @@ async def _render_scene(
     # 1. Prepare each shot
     prepared_shots = []
     for s_idx, shot_p in enumerate(shot_paths):
+        if not Path(shot_p).is_file() or Path(shot_p).stat().st_size == 0:
+            raise RuntimeError(f"Required footage file is missing or empty: {shot_p}")
+        if not Path(audio_path).is_file() or Path(audio_path).stat().st_size == 0:
+            raise RuntimeError(f"Required audio file is missing or empty: {audio_path}")
         prep_out = str(temp_dir / f"scene_{scene_idx}_shot_{s_idx}_kb.mp4")
         await asyncio.to_thread(_prepare_shot, shot_p, shot_dur, prep_out, s_idx)
         prepared_shots.append(prep_out)
@@ -334,21 +348,21 @@ async def _render_scene(
             video_filters.append("boxblur=luma_radius=15:luma_power=2:enable='between(t,0,2.0)'")
             # 2. Draw section number if available
             if sec_num is not None:
-                sec_num_str = f"#{sec_num}" if not str(sec_num).startswith("#") else str(sec_num)
+                sec_num_str = _escape_drawtext(f"#{sec_num}" if not str(sec_num).startswith("#") else str(sec_num))
                 video_filters.append(
                     f"drawtext=text='{sec_num_str}':fontcolor=0xFACC15:fontsize=120:fontweight=bold:"
                     f"x=(w-text_w)/2:y=(h-text_h)/2-60:enable='between(t,0,2.0)'"
                 )
             # 3. Draw section title if available
             if sec_title:
-                clean_title = str(sec_title).replace("'", "").replace(":", "")
+                clean_title = _escape_drawtext(sec_title)
                 video_filters.append(
                     f"drawtext=text='{clean_title}':fontcolor=white:fontsize=48:fontweight=bold:"
                     f"box=1:boxcolor=0x000000@0.7:boxborderw=18:x=(w-text_w)/2:y=(h-text_h)/2+70:"
                     f"enable='between(t,0,2.0)'"
                 )
     elif overlay_type == "stage" and sec_title:
-        clean_title = str(sec_title).replace("'", "").replace(":", "")
+        clean_title = _escape_drawtext(sec_title)
         video_filters.append(
             f"drawtext=text='{clean_title}':fontcolor=0xFACC15:fontsize=52:fontweight=bold:"
             f"box=1:boxcolor=0x000000@0.75:boxborderw=20:x=(w-text_w)/2:y=180:"
@@ -425,10 +439,20 @@ async def render_video(
     niche_id: str | None = None,
     caption_config: dict | None = None,
 ) -> str:
-    """Render all scenes and concatenate into final video with style transitions and background music."""
+    """Render all scenes and concatenate into final video without background music."""
 
     temp_dir = job_dir / "temp"
     temp_dir.mkdir(exist_ok=True)
+
+    if not (len(scenes) == len(audio_paths) == len(audio_durations) == len(shots_per_scene) == len(caption_data)):
+        raise RuntimeError("Render prerequisites are incomplete: every scene needs audio, footage, and captions.")
+    for idx, scene in enumerate(scenes):
+        if not scene.narration.strip() or audio_durations[idx] <= 0:
+            raise RuntimeError(f"Render prerequisites are invalid for scene {idx + 1}.")
+        if not caption_data[idx]:
+            raise RuntimeError(f"Render prerequisites are missing captions for scene {idx + 1}.")
+        if not shots_per_scene[idx]:
+            raise RuntimeError(f"Render prerequisites are missing footage for scene {idx + 1}.")
 
     scene_outputs = []
 
@@ -466,8 +490,6 @@ async def render_video(
         for path in scene_outputs:
             f.write(f"file '{path.replace(chr(92), '/')}'\n")
 
-    raw_unmixed_output = str(temp_dir / "raw_concat.mp4") if niche_id != "none" else final_output
-
     await asyncio.to_thread(
         _run_ffmpeg,
         [
@@ -475,42 +497,10 @@ async def render_video(
             "-safe", "0",
             "-i", concat_file,
             "-c", "copy",
-            raw_unmixed_output,
+            final_output,
         ],
         "Final Scene Concatenation",
     )
-
-    # ── Audio Ducking & Background Music Mix ──────────────────────────────────
-    if niche_id != "none":
-        try:
-            total_duration = sum(audio_durations)
-            from app.services.music import get_music_track_for_niche
-            music_track = get_music_track_for_niche(niche_id, total_duration, job_dir)
-
-            if music_track and Path(music_track).exists():
-                print(f"[Render] Mixing background music track '{music_track}' with audio ducking...")
-                # Audio filter: volume 15% background music mixed with main narration audio
-                filter_complex = "[1:a]volume=0.15[bgm];[0:a][bgm]amix=inputs=2:duration=first:dropout_transition=2[aout]"
-                await asyncio.to_thread(
-                    _run_ffmpeg,
-                    [
-                        "-i", raw_unmixed_output,
-                        "-i", music_track,
-                        "-filter_complex", filter_complex,
-                        "-map", "0:v",
-                        "-map", "[aout]",
-                        "-c:v", "copy",
-                        "-c:a", "aac",
-                        "-b:a", "192k",
-                        final_output,
-                    ],
-                    "Background Music Audio Ducking Mix",
-                )
-        except Exception as e:
-            print(f"[Render] Background music mix error: {e}. Falling back to unmixed audio.")
-            if raw_unmixed_output != final_output and Path(raw_unmixed_output).exists():
-                import shutil
-                shutil.copy(raw_unmixed_output, final_output)
 
     print(f"[Render] Final video rendered successfully: {final_output}")
     return final_output

@@ -23,6 +23,9 @@ export interface JobRequest {
   provided_script?: string;
   additional_context?: string;
   caption_config?: CaptionConfig;
+  domain?: string;
+  niche?: string;
+  project_id?: string;
 }
 
 export interface SubNiche {
@@ -82,7 +85,9 @@ export interface JobStatusResponse {
   output_url?: string;
 }
 
-const API_BASE = "http://localhost:8000";
+// The public Next.js app proxies /api and /health to the internal FastAPI
+// service. An override is retained for local split-server development only.
+const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL || "";
 
 function getOrCreateVisitorId(): string {
   if (typeof window === "undefined") return "server_ssr";
@@ -94,7 +99,7 @@ function getOrCreateVisitorId(): string {
   return vid;
 }
 
-export async function createJob(data: JobRequest): Promise<{ job_id: string }> {
+export async function createJob(data: JobRequest, idempotencyKey?: string): Promise<{ job_id: string }> {
   const visitorId = getOrCreateVisitorId();
   const resp = await fetch(`${API_BASE}/api/jobs`, {
     method: "POST",
@@ -103,6 +108,7 @@ export async function createJob(data: JobRequest): Promise<{ job_id: string }> {
       "Content-Type": "application/json",
       "x-visitor-id": visitorId,
       "x-device-id": visitorId,
+      ...(idempotencyKey ? { "x-idempotency-key": idempotencyKey } : {}),
     },
     body: JSON.stringify(data),
   });
@@ -182,7 +188,7 @@ export interface VideoItem {
   file_path?: string;
   duration: number;
   created_at: string;
-  status: "processing" | "completed" | "failed";
+  status: "processing" | "completed" | "failed" | "pending_review";
 }
 
 export async function getProjects(): Promise<{ projects: Project[] }> {
@@ -331,7 +337,7 @@ export async function getCustomFonts(): Promise<{ fonts: CustomFont[] }> {
 
 export interface ReviewShot {
   shot_index: number;
-  clip_path: string;
+  clip_path?: string;
   stream_url: string;
 }
 
@@ -430,6 +436,65 @@ export async function approveJobSections(
   }
 
   return resp.json();
+}
+
+export type ProviderKeyStatus = "untested" | "valid" | "invalid" | "rate_limited" | "unauthorized" | "unavailable";
+export interface ProviderKeyMetadata {
+  key_id: string;
+  status: ProviderKeyStatus;
+  last_tested_at?: string | null;
+  created_at: string;
+}
+export interface ApiKeySettings {
+  providers: Record<string, { configured: boolean; keys: ProviderKeyMetadata[] }>;
+}
+
+function deviceHeaders(): HeadersInit {
+  const visitorId = getOrCreateVisitorId();
+  return { "x-visitor-id": visitorId, "x-device-id": visitorId };
+}
+
+export async function getApiKeySettings(): Promise<ApiKeySettings> {
+  const resp = await fetch(`${API_BASE}/api/settings/api-keys`, {
+    cache: "no-store",
+    credentials: "include",
+    headers: deviceHeaders(),
+  });
+  if (!resp.ok) throw new Error("فشل تحميل إعدادات مفاتيح الخدمات");
+  return resp.json();
+}
+
+export async function saveApiKey(provider: string, apiKey: string): Promise<{ key_id: string; status: string }> {
+  const resp = await fetch(`${API_BASE}/api/settings/api-keys`, {
+    method: "POST",
+    credentials: "include",
+    headers: { ...deviceHeaders(), "Content-Type": "application/json" },
+    body: JSON.stringify({ provider, api_key: apiKey }),
+  });
+  const data = await resp.json();
+  if (!resp.ok) throw new Error(data.detail || "فشل حفظ المفتاح");
+  return data;
+}
+
+export async function deleteApiKey(provider: string, keyId: string): Promise<void> {
+  const resp = await fetch(`${API_BASE}/api/settings/api-keys/${encodeURIComponent(provider)}/${encodeURIComponent(keyId)}`, {
+    method: "DELETE",
+    credentials: "include",
+    headers: deviceHeaders(),
+  });
+  if (!resp.ok) throw new Error("فشل حذف المفتاح");
+}
+
+export async function testApiKey(provider: string, keyId: string): Promise<{ status: ProviderKeyStatus; message: string }> {
+  const resp = await fetch(`${API_BASE}/api/settings/api-keys/test`, {
+    method: "POST",
+    credentials: "include",
+    headers: { ...deviceHeaders(), "Content-Type": "application/json" },
+    body: JSON.stringify({ provider, key_id: keyId }),
+  });
+  const data = await resp.json();
+  if (!resp.ok) throw new Error(data.detail || "فشل اختبار المفتاح");
+  return data;
 }
 
 

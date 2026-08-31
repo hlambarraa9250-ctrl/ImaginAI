@@ -13,14 +13,14 @@ from app.services.gemini_tts import _clean_text, _convert_to_wav, _save_wav
 FISH_AUDIO_BASE_URL = "https://api.fish.audio/v1"
 
 
-def fetch_fish_audio_voices() -> list[dict]:
+def fetch_fish_audio_voices(device_id: str | None = None) -> list[dict]:
     """
     Fetch available TTS voices/models from Fish Audio API.
     Fetches user models (if API key provided) and public market models.
     """
     api_key = None
     try:
-        api_key = get_fish_audio_key()
+        api_key = get_fish_audio_key(device_id=device_id)
     except Exception:
         pass
 
@@ -93,7 +93,12 @@ def fetch_fish_audio_voices() -> list[dict]:
 
 
 
-async def generate_speech_fish_audio(text: str, output_path: str, voice_id: str) -> str:
+async def generate_speech_fish_audio(
+    text: str,
+    output_path: str,
+    voice_id: str,
+    device_id: str | None = None,
+) -> str:
     """
     Generate audio via Fish Audio REST API (POST /v1/tts) using specific voice_id (reference_id).
     Saves and converts result to WAV at output_path.
@@ -102,7 +107,7 @@ async def generate_speech_fish_audio(text: str, output_path: str, voice_id: str)
     if not cleaned_text:
         raise ValueError("Text cannot be empty for Fish Audio TTS")
 
-    api_key = get_fish_audio_key() # Will raise RuntimeError if missing
+    api_key = get_fish_audio_key(device_id=device_id) # Will raise RuntimeError if missing
 
     headers = {
         "Authorization": f"Bearer {api_key}",
@@ -147,7 +152,12 @@ async def generate_speech_fish_audio(text: str, output_path: str, voice_id: str)
                 pass
 
 
-async def clone_voice_fish_audio(audio_bytes: bytes, filename: str, voice_name: str) -> str:
+async def clone_voice_fish_audio(
+    audio_bytes: bytes,
+    filename: str,
+    voice_name: str,
+    device_id: str | None = None,
+) -> str:
     """
     Submit an audio sample to Fish Audio API (POST https://api.fish.audio/model)
     to create a custom cloned voice model. Returns the created model's ID (fish_voice_id).
@@ -155,7 +165,7 @@ async def clone_voice_fish_audio(audio_bytes: bytes, filename: str, voice_name: 
     if not audio_bytes or len(audio_bytes) < 1000:
         raise ValueError("تعدينة الملف الصوتي قصيرة جداً أو تالفة. يرجى اختيار ملف أو تسجيل بصوت واضح بين 10 إلى 30 ثانية.")
 
-    api_key = get_fish_audio_key() # Will raise error if key missing
+    api_key = get_fish_audio_key(device_id=device_id) # Will raise error if key missing
 
     headers = {
         "Authorization": f"Bearer {api_key}",

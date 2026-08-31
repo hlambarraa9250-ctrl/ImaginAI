@@ -74,8 +74,9 @@ class JobRequest(BaseModel):
 class JobStatusResponse(BaseModel):
     """GET /api/jobs/{job_id}/status response."""
     job_id: str
-    status: Literal["pending", "processing", "pending_review", "done", "failed"]
+    status: Literal["pending", "processing", "pending_section_approval", "pending_review", "done", "failed"]
     current_stage: Optional[str] = None
+    section_proposal: Optional[dict] = None
     stages: dict[str, Literal["pending", "processing", "done", "failed"]]
     error: Optional[str] = None
     output_url: Optional[str] = None
@@ -93,6 +94,16 @@ class ResumeJobRequest(BaseModel):
 
 class SectionApprovalRequest(BaseModel):
     apply_sections: bool = Field(True, description="Whether to apply proposed section overlays or skip")
+
+
+class ApiKeySaveRequest(BaseModel):
+    provider: Literal["gemini", "fish-audio", "pexels", "pixabay", "nasa", "groq"]
+    api_key: str = Field(..., min_length=1, max_length=500)
+
+
+class ApiKeyTestRequest(BaseModel):
+    provider: Literal["gemini", "fish-audio", "pexels", "pixabay", "nasa", "groq"]
+    key_id: str = Field(..., min_length=1, max_length=100)
 
 
 # ── Internal data ────────────────────────────────────────────────────────────

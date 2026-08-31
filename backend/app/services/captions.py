@@ -57,7 +57,7 @@ def _generate_estimated_word_timestamps(audio_path: str, text: str = "") -> list
 
 # ── Single file transcription ───────────────────────────────────────────────
 
-async def transcribe_audio(audio_path: str, narration_text: str = "") -> list[WordTimestamp]:
+async def transcribe_audio(audio_path: str, narration_text: str = "", device_id: str | None = None) -> list[WordTimestamp]:
     """Transcribe a single WAV file using Groq Whisper, falling back to estimation if API fails (e.g. 401 Unauthorized)."""
 
     async def _call():
@@ -65,7 +65,7 @@ async def transcribe_audio(audio_path: str, narration_text: str = "") -> list[Wo
             with open(audio_path, "rb") as f:
                 resp = await client.post(
                     "https://api.groq.com/openai/v1/audio/transcriptions",
-                    headers={"Authorization": f"Bearer {get_groq_key()}"},
+                    headers={"Authorization": f"Bearer {get_groq_key(device_id=device_id)}"},
                     files={"file": (Path(audio_path).name, f, "audio/wav")},
                     data={
                         "model": GROQ_WHISPER_MODEL,
@@ -123,6 +123,7 @@ async def transcribe_all(
     audio_paths: list[str],
     job_dir: Path,
     scenes: list | None = None,
+    device_id: str | None = None,
 ) -> list[list[dict]]:
     """
     Transcribe all audio files, return grouped subtitle lines per scene.
@@ -137,7 +138,7 @@ async def transcribe_all(
     for i, audio_path in enumerate(audio_paths):
         print(f"[Captions] Transcribing scene {i}...")
         narration = scenes[i].narration if (scenes and i < len(scenes)) else ""
-        words = await transcribe_audio(audio_path, narration_text=narration)
+        words = await transcribe_audio(audio_path, narration_text=narration, device_id=device_id)
         lines = group_words_into_lines(words)
 
         # Save caption data

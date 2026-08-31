@@ -299,8 +299,12 @@ def get_all_niches() -> List[Dict[str, Any]]:
     return DOMAINS_DATA
 
 
-def find_niche_info(niche_id: str) -> Dict[str, Any]:
-    """Find specific niche config by ID or return custom placeholder config."""
+def find_niche_info(niche_id: str) -> Dict[str, Any] | None:
+    """Find a catalog niche by its stable ID or title.
+
+    Custom niches are intentionally represented by ``None`` so callers can
+    reject invalid catalog IDs instead of silently changing their behavior.
+    """
     niche_data = None
     for domain in DOMAINS_DATA:
         for sub in domain["sub_niches"]:
@@ -311,15 +315,7 @@ def find_niche_info(niche_id: str) -> Dict[str, Any]:
             break
 
     if not niche_data:
-        niche_data = {
-            "id": niche_id,
-            "title": niche_id,
-            "script_style": "سردي متناسق",
-            "sources": "pexels_video, pixabay_video",
-            "music_mood": "سينمائي هادئ",
-            "clip_duration_limit": 6,
-            "desc": "نيتش مخصص",
-        }
+        return None
 
     # Automatically set section_overlay_type if not explicitly set
     if "section_overlay_type" not in niche_data or not niche_data["section_overlay_type"]:

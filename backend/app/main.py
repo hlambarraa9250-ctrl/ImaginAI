@@ -18,6 +18,15 @@ from app.models import (
     ResumeJobRequest,
     SectionApprovalRequest,
     make_initial_status,
+    ApiKeySaveRequest,
+    ApiKeyTestRequest,
+)
+from app.api_keys import (
+    delete_user_key,
+    get_user_key_by_id,
+    list_key_metadata,
+    record_test_result,
+    save_user_key,
 )
 from app.db import (
     init_db,
@@ -44,6 +53,26 @@ from contextlib import asynccontextmanager
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     init_db()
+    # Jobs cannot continue executing after a process restart. Mark only jobs
+    # that were actively running as interrupted; review/approval states remain
+    # resumable and are intentionally left untouched.
+    for job_path in JOBS_DIR.iterdir() if JOBS_DIR.exists() else []:
+        status_path = job_path / "status.json"
+        if not status_path.exists():
+            continue
+        try:
+            status = json.loads(status_path.read_text(encoding="utf-8"))
+            if status.get("status") in {"pending", "processing"}:
+                status.update({
+                    "status": "failed",
+                    "current_stage": None,
+                    "error": "توقفت عملية التوليد بسبب إعادة تشغيل الخادم. يرجى بدء توليد جديد.",
+                })
+                status_path.write_text(json.dumps(status, ensure_ascii=False, indent=2), encoding="utf-8")
+                from app.db import update_video
+                update_video(video_id=job_path.name, status="failed")
+        except Exception:
+            continue
     yield
 
 app = FastAPI(title="imaginAI", version="1.0.0", lifespan=lifespan)
@@ -108,6 +137,39 @@ def _write_status(job_id: str, data: dict) -> None:
     status_file.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
+def _assert_job_owner(job_id: str, device_id: str) -> None:
+    """Prevent one device from reading or mutating another device's job."""
+    request_file = _job_dir(job_id) / "request.json"
+    if request_file.exists():
+        try:
+            owner = json.loads(request_file.read_text(encoding="utf-8")).get("device_id")
+            if owner and owner != device_id:
+                raise HTTPException(status_code=404, detail="Job not found")
+            return
+        except HTTPException:
+            raise
+        except Exception:
+            raise HTTPException(status_code=404, detail="Job not found")
+
+    with get_db_connection() as conn:
+        row = conn.execute(
+            """
+            SELECT p.device_id FROM videos v
+            JOIN projects p ON p.project_id = v.project_id
+            WHERE v.video_id = ?
+            """,
+            (job_id,),
+        ).fetchone()
+    if not row or row["device_id"] != device_id:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+
+def _assert_project_owner(project_id: str, device_id: str) -> None:
+    project = get_project(project_id)
+    if not project or project["device_id"] != device_id:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+
 # ── Routes ───────────────────────────────────────────────────────────────────
 
 @app.get("/health")
@@ -141,6 +203,9 @@ async def reset_device(response: Response, device_id: str = Depends(get_current_
 @app.post("/api/projects")
 async def api_create_project(req: ProjectCreate, device_id: str = Depends(get_current_device)):
     """Create a new project linked to device_id."""
+    from app.niches import find_niche_info
+    if not find_niche_info(req.niche) and not req.niche.strip():
+        raise HTTPException(status_code=400, detail="يرجى اختيار نيتش صالح.")
     project_id = f"proj_{uuid.uuid4().hex[:8]}"
     return create_project(
         project_id=project_id,
@@ -161,15 +226,15 @@ async def api_list_projects(device_id: str = Depends(get_current_device)):
 async def api_get_project(project_id: str, device_id: str = Depends(get_current_device)):
     """Get project details and its videos."""
     proj = get_project(project_id)
-    if not proj:
-        raise HTTPException(status_code=404, detail="Project not found")
+    _assert_project_owner(project_id, device_id)
     videos = get_videos_by_project(project_id)
     return {"project": proj, "videos": videos}
 
 
 @app.get("/api/videos/{video_id}/stream")
-async def api_stream_video(video_id: str):
+async def api_stream_video(video_id: str, device_id: str = Depends(get_current_device)):
     """Stream a stored video by video_id directly from permanent storage or jobs."""
+    _assert_job_owner(video_id, device_id)
     with get_db_connection() as conn:
         cursor = conn.cursor()
         cursor.execute("SELECT file_path FROM videos WHERE video_id = ?", (video_id,))
@@ -202,7 +267,7 @@ async def list_voices(device_id: str = Depends(get_current_device)):
     providers = json.loads(json.dumps(VOICE_PROVIDERS))
     
     # Dynamically inject Fish Audio voices if available
-    fish_voices = fetch_fish_audio_voices()
+    fish_voices = fetch_fish_audio_voices(device_id=device_id)
 
     # Retrieve custom cloned voices for device
     custom_records = get_custom_voices_by_device(device_id)
@@ -247,6 +312,7 @@ async def clone_voice(
             audio_bytes=content,
             filename=file.filename or "sample.wav",
             voice_name=voice_name.strip(),
+            device_id=device_id,
         )
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -258,7 +324,7 @@ async def clone_voice(
 
     try:
         sample_text = f"مرحباً! هذا التسجيل هو تجربة لاختبار جودة صوتك المستنسخ {voice_name} عبر منصة إيماجن أي آي."
-        await generate_speech_fish_audio(sample_text, str(preview_path), voice_id=fish_voice_id)
+        await generate_speech_fish_audio(sample_text, str(preview_path), voice_id=fish_voice_id, device_id=device_id)
     except Exception as e:
         print(f"[Clone Preview Warning] Could not generate immediate preview for cloned voice: {e}")
 
@@ -334,6 +400,7 @@ async def preview_voice(
     provider: str = Query("edge-tts", description="TTS Provider (edge-tts, gemini, gtts, fish-audio)"),
     voice: str = Query("ar-SA-HamedNeural", description="Voice ID"),
     refresh: bool = Query(False, description="Force regenerate preview audio"),
+    device_id: str = Depends(get_current_device),
 ):
     """Generate and stream a short preview audio sample for the selected voice."""
     previews_dir = JOBS_DIR / "previews"
@@ -368,6 +435,7 @@ async def preview_voice(
                 output_path=str(preview_file),
                 voice=voice,
                 provider=provider,
+                device_id=device_id,
             )
         except Exception as e:
             err_msg = str(e)
@@ -390,6 +458,7 @@ async def create_job(
     response: Response,
     device_id: str = Depends(get_current_device),
     x_visitor_id: str = Header(None, alias="x-visitor-id"),
+    x_idempotency_key: str | None = Header(None, alias="x-idempotency-key"),
 ):
     # Determine visitor identity
     visitor_id = device_id or x_visitor_id or f"ip_{request.client.host if request.client else '127.0.0.1'}"
@@ -403,6 +472,34 @@ async def create_job(
     project_id = req.project_id
     domain = req.domain or "عام"
     niche = req.niche or "محتوى عام"
+
+    from app.niches import find_niche_info
+    if req.niche_id and not find_niche_info(req.niche_id) and not req.custom_niche:
+        raise HTTPException(status_code=400, detail="معرّف النيتش غير صالح.")
+
+    if x_idempotency_key:
+        for existing_dir in JOBS_DIR.iterdir() if JOBS_DIR.exists() else []:
+            request_file = existing_dir / "request.json"
+            if not request_file.exists():
+                continue
+            try:
+                saved = json.loads(request_file.read_text(encoding="utf-8"))
+                if saved.get("device_id") == device_id and saved.get("idempotency_key") == x_idempotency_key:
+                    return {
+                        "job_id": existing_dir.name,
+                        "project_id": saved.get("project_id"),
+                        "device_id": device_id,
+                        "duplicate": True,
+                    }
+            except Exception:
+                continue
+
+    if project_id:
+        _assert_project_owner(project_id, device_id)
+        project = get_project(project_id)
+        if project:
+            domain = project.get("domain") or domain
+            niche = project.get("niche") or niche
 
     if not project_id:
         existing_projects = get_projects_by_device(device_id)
@@ -454,6 +551,7 @@ async def create_job(
                 "additional_context": req.additional_context,
                 "strict_focus": req.strict_focus,
                 "caption_config": req.caption_config,
+                "idempotency_key": x_idempotency_key,
             },
             ensure_ascii=False,
             indent=2,
@@ -484,6 +582,47 @@ async def create_job(
     return {"job_id": job_id, "project_id": project_id, "device_id": device_id}
 
 
+@app.get("/api/settings/api-keys")
+async def get_api_key_settings(device_id: str = Depends(get_current_device)):
+    return {"providers": list_key_metadata(device_id)}
+
+
+@app.post("/api/settings/api-keys")
+async def save_api_key_settings(req: ApiKeySaveRequest, device_id: str = Depends(get_current_device)):
+    try:
+        return {"success": True, **save_user_key(device_id, req.provider, req.api_key)}
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc))
+
+
+@app.delete("/api/settings/api-keys/{provider}/{key_id}")
+async def delete_api_key_settings(provider: str, key_id: str, device_id: str = Depends(get_current_device)):
+    if not delete_user_key(device_id, provider, key_id):
+        raise HTTPException(status_code=404, detail="API key not found.")
+    return {"success": True}
+
+
+@app.post("/api/settings/api-keys/test")
+async def test_api_key_settings(req: ApiKeyTestRequest, device_id: str = Depends(get_current_device)):
+    from app.services.provider_tests import test_provider
+    try:
+        api_key = get_user_key_by_id(device_id, req.provider, req.key_id)
+    except (KeyError, RuntimeError):
+        raise HTTPException(status_code=404, detail="API key not found.")
+
+    result = await test_provider(req.provider, api_key)
+    record_test_result(
+        device_id=device_id,
+        provider=req.provider,
+        key_id=req.key_id,
+        status=result["status"],
+        error=result.get("message"),
+    )
+    return {"success": result["status"] == "valid", **result}
+
+
 @app.post("/api/feedback")
 async def receive_feedback(payload: dict):
     """Receive user feedback / suggestions and store in backend/data/feedback.json."""
@@ -512,12 +651,14 @@ async def receive_feedback(payload: dict):
 
 
 @app.get("/api/jobs/{job_id}/status", response_model=JobStatusResponse)
-async def get_job_status(job_id: str):
+async def get_job_status(job_id: str, device_id: str = Depends(get_current_device)):
+    _assert_job_owner(job_id, device_id)
     return _read_status(job_id)
 
 
 @app.get("/api/jobs/{job_id}/download")
-async def download_video(job_id: str):
+async def download_video(job_id: str, device_id: str = Depends(get_current_device)):
+    _assert_job_owner(job_id, device_id)
     # First check permanent storage, fallback to jobs output.mp4
     from app.db import get_db_connection
     with get_db_connection() as conn:
@@ -542,21 +683,30 @@ async def download_video(job_id: str):
 
 
 @app.get("/api/jobs/{job_id}/review")
-async def get_job_review_data(job_id: str):
+async def get_job_review_data(job_id: str, device_id: str = Depends(get_current_device)):
     """Retrieve review_data.json for a job in pending_review status."""
+    _assert_job_owner(job_id, device_id)
     review_file = _job_dir(job_id) / "review_data.json"
     if not review_file.exists():
         raise HTTPException(status_code=404, detail="بيانات المراجعة غير موجودة أو لم تكتمل مرحلة اللقطات بعد.")
     try:
         data = json.loads(review_file.read_text(encoding="utf-8"))
+        # Internal filesystem paths are never exposed to the browser. The
+        # browser already receives an authenticated stream_url for each shot.
+        for scene in data.get("scenes", []):
+            scene.pop("clip_path", None)
+            scene.pop("audio_path", None)
+            for shot in scene.get("shots", []):
+                shot.pop("clip_path", None)
         return data
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"خطأ في قراءة بيانات المراجعة: {str(e)}")
 
 
 @app.get("/api/jobs/{job_id}/clips/{scene_index}/{shot_index}")
-async def get_job_clip(job_id: str, scene_index: int, shot_index: int):
+async def get_job_clip(job_id: str, scene_index: int, shot_index: int, device_id: str = Depends(get_current_device)):
     """Stream a video clip associated with a job scene for review preview."""
+    _assert_job_owner(job_id, device_id)
     review_file = _job_dir(job_id) / "review_data.json"
     if not review_file.exists():
         raise HTTPException(status_code=404, detail="الملف غير موجود.")
@@ -568,6 +718,10 @@ async def get_job_clip(job_id: str, scene_index: int, shot_index: int):
     if shot_index < 0 or shot_index >= len(shots):
         raise HTTPException(status_code=404, detail="اللقطة غير موجودة.")
     clip_path = Path(shots[shot_index].get("clip_path", ""))
+    try:
+        clip_path.resolve().relative_to(_job_dir(job_id).resolve())
+    except ValueError:
+        raise HTTPException(status_code=400, detail="مسار اللقطة غير صالح.")
     if not clip_path.exists():
         raise HTTPException(status_code=404, detail="ملف اللقطة غير موجود على السيرفر.")
     return FileResponse(clip_path, media_type="video/mp4")
@@ -578,8 +732,10 @@ async def resume_job_endpoint(
     job_id: str,
     req: ResumeJobRequest,
     background_tasks: BackgroundTasks,
+    device_id: str = Depends(get_current_device),
 ):
     """Resume a job paused at pending_review after applying user edits."""
+    _assert_job_owner(job_id, device_id)
     status_file = _job_dir(job_id) / "status.json"
     if not status_file.exists():
         raise HTTPException(status_code=404, detail="الـ Job غير موجود.")
@@ -608,8 +764,10 @@ async def approve_sections_endpoint(
     job_id: str,
     req: SectionApprovalRequest,
     background_tasks: BackgroundTasks,
+    device_id: str = Depends(get_current_device),
 ):
     """Approve or decline proposed section overlays for dynamic section analysis."""
+    _assert_job_owner(job_id, device_id)
     status_file = _job_dir(job_id) / "status.json"
     if not status_file.exists():
         raise HTTPException(status_code=404, detail="الـ Job غير موجود.")

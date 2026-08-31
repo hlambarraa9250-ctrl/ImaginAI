@@ -59,6 +59,10 @@ import {
   getJobReviewData,
   resumeJob,
   approveJobSections,
+  getApiKeySettings,
+  saveApiKey,
+  deleteApiKey,
+  testApiKey,
   ReviewData,
   CustomFont,
   JobStatusResponse, 
@@ -67,10 +71,11 @@ import {
   DomainCategory,
   SubNiche,
   Project,
-  VideoItem
+  VideoItem,
+  ApiKeySettings
 } from "../lib/api";
 
-type ScreenState = "dashboard" | "wizard_step1" | "wizard_step2" | "wizard_step3" | "input" | "voice" | "progress" | "review" | "result";
+type ScreenState = "dashboard" | "settings" | "wizard_step1" | "wizard_step2" | "wizard_step3" | "input" | "voice" | "progress" | "review" | "result";
 
 // Fallback Voice Providers catalog
 const DEFAULT_PROVIDERS: VoiceProviderCatalog[] = [
@@ -190,6 +195,7 @@ export default function Home() {
   const [statusData, setStatusData] = useState<JobStatusResponse | null>(null);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const pollingInterval = useRef<NodeJS.Timeout | null>(null);
+  const generationLock = useRef(false);
 
   // Section Approval Modal State (Dynamic Analysis)
   const [sectionApprovalData, setSectionApprovalData] = useState<any>(null);
@@ -201,6 +207,10 @@ export default function Home() {
   const [feedbackContact, setFeedbackContact] = useState("");
   const [feedbackSending, setFeedbackSending] = useState(false);
   const [feedbackStatus, setFeedbackStatus] = useState<{ type: "success" | "error"; text: string } | null>(null);
+  const [apiKeySettings, setApiKeySettings] = useState<ApiKeySettings | null>(null);
+  const [apiKeyInputs, setApiKeyInputs] = useState<Record<string, string>>({});
+  const [apiKeyBusy, setApiKeyBusy] = useState<string | null>(null);
+  const [apiKeyMessage, setApiKeyMessage] = useState<string | null>(null);
 
   // ── Voice Recording & Cloning Handlers (Fish Audio) ────────────────────────
   const handleStartRecording = async () => {
@@ -321,6 +331,66 @@ export default function Home() {
     }
   };
 
+  const loadApiKeySettings = async () => {
+    try {
+      setApiKeySettings(await getApiKeySettings());
+    } catch (err) {
+      console.error("Failed to load API key settings:", err);
+    }
+  };
+
+  const providerLabels: Record<string, string> = {
+    gemini: "Gemini (السكريبت والصوت)",
+    "fish-audio": "Fish Audio",
+    pexels: "Pexels",
+    pixabay: "Pixabay",
+    nasa: "NASA",
+    groq: "Groq Whisper",
+  };
+
+  const handleSaveApiKey = async (provider: string) => {
+    const value = (apiKeyInputs[provider] || "").trim();
+    if (!value) return;
+    setApiKeyBusy(`save:${provider}`);
+    setApiKeyMessage(null);
+    try {
+      await saveApiKey(provider, value);
+      setApiKeyInputs((prev) => ({ ...prev, [provider]: "" }));
+      await loadApiKeySettings();
+      setApiKeyMessage("تم حفظ المفتاح بشكل مشفّر. اختبره للتأكد من صلاحيته.");
+    } catch (err: any) {
+      setApiKeyMessage(err.message || "تعذر حفظ المفتاح.");
+    } finally {
+      setApiKeyBusy(null);
+    }
+  };
+
+  const handleTestApiKey = async (provider: string, keyId: string) => {
+    setApiKeyBusy(`test:${keyId}`);
+    setApiKeyMessage(null);
+    try {
+      const result = await testApiKey(provider, keyId);
+      await loadApiKeySettings();
+      setApiKeyMessage(result.message || `حالة الاختبار: ${result.status}`);
+    } catch (err: any) {
+      setApiKeyMessage(err.message || "تعذر اختبار المفتاح.");
+    } finally {
+      setApiKeyBusy(null);
+    }
+  };
+
+  const handleDeleteApiKey = async (provider: string, keyId: string) => {
+    setApiKeyBusy(`delete:${keyId}`);
+    try {
+      await deleteApiKey(provider, keyId);
+      await loadApiKeySettings();
+    } catch (err: any) {
+      setApiKeyMessage(err.message || "تعذر حذف المفتاح.");
+    } finally {
+      setApiKeyBusy(null);
+    }
+  };
+
   const handleUploadFontSubmit = async () => {
     if (!uploadFontFile) {
       setUploadFontError("يرجى اختيار ملف الخط (.ttf أو .otf)");
@@ -369,6 +439,12 @@ export default function Home() {
     loadCustomFonts();
   }, []);
 
+  useEffect(() => {
+    if (screen === "settings" && !apiKeySettings) {
+      loadApiKeySettings();
+    }
+  }, [screen, apiKeySettings]);
+
   // ── Notification Initializer ─────────────────────────────────────────────
   useEffect(() => {
     if (typeof window !== "undefined" && "Notification" in window) {
@@ -415,6 +491,8 @@ export default function Home() {
           }
         } else if (data.status === "done") {
           setScreen("result");
+          generationLock.current = false;
+          if (typeof window !== "undefined") localStorage.removeItem("imaginai_active_job");
           if (pollingInterval.current) clearInterval(pollingInterval.current);
 
           // Refresh saved project videos from SQLite DB immediately!
@@ -458,6 +536,9 @@ export default function Home() {
           }
         } else if (data.status === "failed") {
           setErrorMsg(data.error || "حدث خطأ غير متوقع أثناء معالجة الفيديو.");
+          generationLock.current = false;
+          if (typeof window !== "undefined") localStorage.removeItem("imaginai_active_job");
+          setScreen("voice");
           if (pollingInterval.current) clearInterval(pollingInterval.current);
         }
       } catch (err: any) {
@@ -465,6 +546,43 @@ export default function Home() {
       }
     }, 3000);
   };
+
+  // Refresh recovery: the active job id is persisted before the first poll,
+  // so a browser refresh can reattach to the same server-side job.
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const savedJobId = localStorage.getItem("imaginai_active_job");
+    if (!savedJobId || jobId) return;
+    setJobId(savedJobId);
+    getJobStatus(savedJobId)
+      .then(async (data) => {
+        setStatusData(data);
+        if (data.status === "pending_review") {
+          const rev = await getJobReviewData(savedJobId);
+          setReviewData(rev);
+          setEditedScenesMap(Object.fromEntries(rev.scenes.map((s) => [s.scene_index, s.narration])));
+          setScreen("review");
+        } else if (data.status === "pending_section_approval") {
+          setSectionApprovalData((data as any).section_proposal || true);
+        } else if (data.status === "done") {
+          localStorage.removeItem("imaginai_active_job");
+          generationLock.current = false;
+          setScreen("result");
+        } else if (data.status === "failed") {
+          localStorage.removeItem("imaginai_active_job");
+          generationLock.current = false;
+          setErrorMsg(data.error || "توقفت عملية التوليد.");
+          setScreen("voice");
+        } else {
+          generationLock.current = true;
+          setScreen("progress");
+          startPolling(savedJobId);
+        }
+      })
+      .catch(() => {
+        localStorage.removeItem("imaginai_active_job");
+      });
+  }, []);
 
   useEffect(() => {
     return () => {
@@ -584,6 +702,7 @@ export default function Home() {
   };
 
   const handleStartGeneration = async () => {
+    if (generationLock.current) return;
     if (!activeProject) {
       alert("الرجاء اختيار أو إنشاء مشروع أولاً");
       return;
@@ -592,6 +711,9 @@ export default function Home() {
     setErrorMsg(null);
     setStatusData(null);
     setScreen("progress");
+    generationLock.current = true;
+    const idempotencyKey = `generate_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+    if (typeof window !== "undefined") localStorage.setItem("imaginai_active_job_pending", idempotencyKey);
 
     try {
       const finalIdea = inputMode === "script_provided" ? providedScript.trim().slice(0, 80) : idea.trim();
@@ -602,16 +724,25 @@ export default function Home() {
         voice: selectedVoice,
         niche_id: activeProject.niche,
         custom_niche: activeProject.niche,
+        domain: activeProject.domain,
+        niche: activeProject.niche,
+        project_id: activeProject.project_id,
         music_track: selectedMusic,
         caption_config: captionConfig,
         input_mode: inputMode,
         provided_script: inputMode === "script_provided" ? providedScript.trim() : undefined,
         additional_context: inputMode === "ai_generated" && additionalContext.trim() ? additionalContext.trim() : undefined,
-      });
+      }, idempotencyKey);
       setJobId(res.job_id);
+      if (typeof window !== "undefined") {
+        localStorage.setItem("imaginai_active_job", res.job_id);
+        localStorage.removeItem("imaginai_active_job_pending");
+      }
       startPolling(res.job_id);
     } catch (err: any) {
       setErrorMsg(err.message || "حدث خطأ أثناء بدء عملية توليد الفيديو. يرجى التأكد من الموديل المختار والخدمة.");
+      generationLock.current = false;
+      if (typeof window !== "undefined") localStorage.removeItem("imaginai_active_job_pending");
       setScreen("voice");
     }
   };
@@ -791,6 +922,13 @@ export default function Home() {
             </div>
 
             <div className="flex items-center gap-3">
+              <button
+                onClick={() => setScreen("settings")}
+                className="px-3 py-1.5 rounded-lg bg-[#171717] border border-neutral-800 text-xs font-semibold text-neutral-300 hover:border-amber-500/40 transition-colors flex items-center gap-2"
+              >
+                <Sliders className="w-3.5 h-3.5 text-amber-400" />
+                <span>إعدادات الخدمات</span>
+              </button>
               {activeProject && (
                 <button
                   onClick={() => setScreen("dashboard")}
@@ -945,6 +1083,110 @@ export default function Home() {
                 )}
               </div>
             )}
+          </div>
+        )}
+
+        {screen === "settings" && (
+          <div className="w-full max-w-3xl animate-in fade-in slide-in-from-bottom-4 duration-500">
+            <div className="bg-[#121212] border border-neutral-800 rounded-2xl p-6 shadow-2xl">
+              <div className="flex items-start justify-between gap-4 mb-6">
+                <div>
+                  <div className="inline-flex items-center gap-2 text-amber-400 bg-amber-950/30 border border-amber-800/40 px-3 py-1 rounded-full text-xs font-bold mb-3">
+                    <Sliders className="w-4 h-4" />
+                    إعدادات الخدمات
+                  </div>
+                  <h2 className="text-2xl font-extrabold text-white">مفاتيح API الخاصة بك</h2>
+                  <p className="text-sm text-neutral-400 mt-1 leading-relaxed">
+                    تحفظ المفاتيح مشفّرة على الخادم ولا يتم عرضها في المتصفح أو تسجيلها في السجلات.
+                    عند إضافة مفتاحك سيُستخدم أولاً قبل إعدادات الخادم.
+                  </p>
+                </div>
+                <button onClick={() => setScreen("dashboard")} className="text-neutral-400 hover:text-white text-sm">
+                  رجوع
+                </button>
+              </div>
+
+              {apiKeyMessage && (
+                <div className="mb-4 rounded-xl border border-amber-500/30 bg-amber-500/10 text-amber-200 p-3 text-xs">
+                  {apiKeyMessage}
+                </div>
+              )}
+
+              <div className="space-y-3">
+                {Object.entries(providerLabels).map(([provider, label]) => {
+                  const entry = apiKeySettings?.providers?.[provider];
+                  const keys = entry?.keys || [];
+                  return (
+                    <div key={provider} className="rounded-xl border border-neutral-800 bg-[#181818] p-4">
+                      <div className="flex items-center justify-between gap-3 mb-3">
+                        <div>
+                          <h3 className="text-sm font-bold text-white">{label}</h3>
+                          <p className="text-[11px] text-neutral-500 mt-1">
+                            {provider === "gemini" ? "يمكنك إضافة حتى 5 مفاتيح للتبديل المحدود عند تجاوز الحصة." : "مفتاح واحد اختياري لكل خدمة."}
+                          </p>
+                        </div>
+                        <span className={`text-[10px] px-2 py-1 rounded-full border ${
+                          entry?.configured ? "text-emerald-300 bg-emerald-500/10 border-emerald-500/30" : "text-neutral-500 bg-neutral-900 border-neutral-800"
+                        }`}>
+                          {entry?.configured ? "مُكوّن" : "غير مُكوّن"}
+                        </span>
+                      </div>
+
+                      {keys.map((key) => (
+                        <div key={key.key_id} className="flex items-center justify-between gap-3 bg-neutral-900 border border-neutral-800 rounded-lg px-3 py-2 mb-2">
+                          <span className="text-xs text-neutral-300 font-mono">••••••••••••</span>
+                          <div className="flex items-center gap-2">
+                            <span className={`text-[10px] ${
+                              key.status === "valid" ? "text-emerald-400" :
+                              key.status === "rate_limited" ? "text-amber-400" :
+                              key.status === "unauthorized" || key.status === "invalid" ? "text-rose-400" :
+                              "text-neutral-400"
+                            }`}>
+                              {key.status === "valid" ? "صالح" : key.status === "rate_limited" ? "محدود مؤقتاً" : key.status === "unauthorized" ? "غير مصرح" : key.status === "invalid" ? "غير صالح" : key.status === "unavailable" ? "الخدمة غير متاحة" : "لم يُختبر"}
+                            </span>
+                            <button
+                              onClick={() => handleTestApiKey(provider, key.key_id)}
+                              disabled={apiKeyBusy !== null}
+                              className="text-[10px] text-amber-300 hover:text-amber-200 disabled:opacity-40"
+                            >
+                              {apiKeyBusy === `test:${key.key_id}` ? "يُختبر..." : "اختبار"}
+                            </button>
+                            <button
+                              onClick={() => handleDeleteApiKey(provider, key.key_id)}
+                              disabled={apiKeyBusy !== null}
+                              className="text-[10px] text-rose-300 hover:text-rose-200 disabled:opacity-40"
+                            >
+                              حذف
+                            </button>
+                          </div>
+                        </div>
+                      ))}
+
+                      <div className="flex gap-2">
+                        <input
+                          type="password"
+                          value={apiKeyInputs[provider] || ""}
+                          onChange={(e) => setApiKeyInputs((prev) => ({ ...prev, [provider]: e.target.value }))}
+                          placeholder="ألصق مفتاح API هنا"
+                          className="flex-1 bg-[#101010] border border-neutral-700 rounded-lg px-3 py-2 text-xs text-white placeholder:text-neutral-600 focus:outline-none focus:border-amber-500"
+                          autoComplete="off"
+                        />
+                        <button
+                          onClick={() => handleSaveApiKey(provider)}
+                          disabled={!apiKeyInputs[provider]?.trim() || apiKeyBusy !== null}
+                          className="px-4 rounded-lg bg-amber-500 text-black text-xs font-bold hover:bg-amber-400 disabled:opacity-40"
+                        >
+                          {apiKeyBusy === `save:${provider}` ? "يحفظ..." : "حفظ"}
+                        </button>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+              <p className="text-[11px] text-neutral-500 mt-5 leading-relaxed">
+                لا تضع مفاتيح حقيقية في ملفات المشروع أو في المحادثة. اختبارات المفاتيح ترسل طلباً واحداً منخفض التكلفة فقط.
+              </p>
+            </div>
           </div>
         )}
 

@@ -86,6 +86,23 @@ def init_db() -> None:
             )
         """)
 
+        # Encrypted, device-scoped provider keys for BYOK.
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS api_keys (
+                device_id TEXT NOT NULL,
+                provider TEXT NOT NULL,
+                key_id TEXT NOT NULL,
+                encrypted_key TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'untested',
+                last_error TEXT,
+                last_tested_at TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY (device_id, provider, key_id),
+                FOREIGN KEY (device_id) REFERENCES devices (device_id) ON DELETE CASCADE
+            )
+        """)
+
         conn.commit()
 
 

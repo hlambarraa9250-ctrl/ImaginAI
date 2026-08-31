@@ -7,7 +7,6 @@ Includes robust text cleaning, language auto-detection, and HTTP chunking.
 
 import asyncio
 import os
-import sys
 import subprocess
 import wave
 import tempfile
@@ -19,30 +18,8 @@ import httpx  # type: ignore
 from google import genai  # type: ignore
 from google.genai import types  # type: ignore
 
-from app.config import get_gemini_key, get_gemini_keys, GEMINI_TTS_MODEL, GEMINI_TTS_VOICE
+from app.config import get_gemini_keys, GEMINI_TTS_MODEL, GEMINI_TTS_VOICE
 from app.models import ScriptScene
-
-
-# ── Auto-install missing packages dynamically into active Python env ─────────
-
-def _ensure_dependencies():
-    """Auto-install edge-tts and gTTS if missing in current running Python executable."""
-    for pkg_import, pkg_pip in [("edge_tts", "edge-tts"), ("gtts", "gTTS")]:
-        try:
-            __import__(pkg_import)
-        except ImportError:
-            print(f"[TTS Setup] Installing missing python package '{pkg_pip}'...")
-            try:
-                subprocess.run(
-                    [sys.executable, "-m", "pip", "install", pkg_pip],
-                    capture_output=True,
-                    timeout=90,
-                )
-                print(f"[TTS Setup] Successfully installed '{pkg_pip}'!")
-            except Exception as e:
-                print(f"[TTS Setup] Warning: Failed to auto-install '{pkg_pip}': {e}")
-
-_ensure_dependencies()
 
 
 # ── Text Cleaning & Language Helpers ──────────────────────────────────────────
@@ -250,10 +227,10 @@ async def _generate_gtts_http(text: str, output_path: str, lang: str | None = No
 
 # ── Provider Specific Generators ────────────────────────────────────────────
 
-async def _generate_gemini(text: str, output_path: str, voice: str) -> str:
+async def _generate_gemini(text: str, output_path: str, voice: str, device_id: str | None = None) -> str:
     """Generate audio via Google Gemini TTS API with multi-key failover."""
     cleaned_text = _clean_text(text)
-    keys = get_gemini_keys()
+    keys = get_gemini_keys(device_id=device_id)
     response = None
     last_error = None
 
@@ -352,6 +329,7 @@ async def generate_speech(
     output_path: str,
     voice: str = "Kore",
     provider: str = "gemini",
+    device_id: str | None = None,
 ) -> str:
     """
     Generate speech for a single narration scene using the chosen provider and voice.
@@ -361,11 +339,11 @@ async def generate_speech(
     prov = (provider or "gemini").lower()
 
     if prov == "gemini":
-        return await _generate_gemini(cleaned_text, output_path, voice)
+        return await _generate_gemini(cleaned_text, output_path, voice, device_id=device_id)
 
     elif prov in ["fish-audio", "fish_audio", "fish"]:
         from app.services.fish_audio_tts import generate_speech_fish_audio
-        return await generate_speech_fish_audio(cleaned_text, output_path, voice)
+        return await generate_speech_fish_audio(cleaned_text, output_path, voice, device_id=device_id)
 
     elif prov in ["edge-tts", "edge_tts", "edge"]:
         return await _generate_edge_tts(cleaned_text, output_path, voice)
@@ -375,7 +353,7 @@ async def generate_speech(
 
     else:
         # Default to Gemini TTS
-        return await _generate_gemini(cleaned_text, output_path, voice or "Kore")
+        return await _generate_gemini(cleaned_text, output_path, voice or "Kore", device_id=device_id)
 
 
 
@@ -387,6 +365,7 @@ async def generate_all_speech(
     voice: str = "ar-SA-HamedNeural",
     provider: str = "edge-tts",
     start_index: int = 0,
+    device_id: str | None = None,
 ) -> list[str]:
     """Generate speech for all scenes sequentially starting at start_index."""
 
@@ -397,7 +376,7 @@ async def generate_all_speech(
     for i, scene in enumerate(scenes):
         idx = start_index + i
         output_path = str(audio_dir / f"scene_{idx}.wav")
-        await generate_speech(scene.narration, output_path, voice=voice, provider=provider)
+        await generate_speech(scene.narration, output_path, voice=voice, provider=provider, device_id=device_id)
         audio_paths.append(output_path)
 
         if i < len(scenes) - 1:

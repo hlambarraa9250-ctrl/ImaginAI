@@ -28,13 +28,24 @@ DATA_DIR = _backend_dir / "data"
 DATA_DIR.mkdir(exist_ok=True)
 
 # ── API Keys (never hardcoded) ───────────────────────────────────────────────
-def get_gemini_keys() -> list[str]:
+def get_gemini_keys(device_id: str | None = None) -> list[str]:
     """
     Get list of Gemini API keys for failover rotation.
     Supports:
     1. GEMINI_API_KEYS (comma-separated: key1,key2,key3)
     2. Individual vars GEMINI_API_KEY, GEMINI_API_KEY_1, GEMINI_API_KEY_2 ... GEMINI_API_KEY_10
     """
+    if device_id:
+        try:
+            from app.api_keys import get_user_keys
+            user_keys = get_user_keys(device_id, "gemini")
+            if user_keys:
+                return user_keys
+        except Exception:
+            # A missing encryption secret must not prevent the app from using
+            # intentionally configured server-side fallback keys.
+            pass
+
     keys = []
     
     # 1. Check comma-separated GEMINI_API_KEYS
@@ -55,40 +66,47 @@ def get_gemini_keys() -> list[str]:
     if not keys:
         raise RuntimeError("No Gemini API keys found! Set GEMINI_API_KEY or GEMINI_API_KEYS in .env")
 
-    return keys
+    # BYOK and server-side failover are intentionally bounded.
+    return keys[:5]
 
 
-def get_gemini_key() -> str:
+def get_gemini_key(device_id: str | None = None) -> str:
     """Get the primary Gemini API key."""
-    return get_gemini_keys()[0]
+    return get_gemini_keys(device_id=device_id)[0]
 
-def get_pexels_key() -> str:
-    key = os.getenv("PEXELS_API_KEY")
+def _get_provider_key(provider: str, env_name: str, device_id: str | None = None) -> str:
+    if device_id:
+        try:
+            from app.api_keys import get_user_keys
+            user_keys = get_user_keys(device_id, provider)
+            if user_keys:
+                return user_keys[0]
+        except Exception:
+            pass
+    key = os.getenv(env_name)
     if not key:
-        raise RuntimeError("PEXELS_API_KEY is not set in .env")
+        raise RuntimeError(f"{env_name} is not set in .env")
     return key
 
-def get_pixabay_key() -> str:
-    key = os.getenv("PIXABAY_API_KEY")
-    if not key:
-        raise RuntimeError("PIXABAY_API_KEY is not set in .env")
-    return key
+def get_pexels_key(device_id: str | None = None) -> str:
+    return _get_provider_key("pexels", "PEXELS_API_KEY", device_id)
 
-def get_groq_key() -> str:
-    key = os.getenv("GROQ_API_KEY")
-    if not key:
-        raise RuntimeError("GROQ_API_KEY is not set in .env")
-    return key
+def get_pixabay_key(device_id: str | None = None) -> str:
+    return _get_provider_key("pixabay", "PIXABAY_API_KEY", device_id)
 
-def get_fish_audio_key() -> str:
-    key = os.getenv("FISH_AUDIO_API_KEY", "").strip()
-    if not key:
-        raise RuntimeError("FISH_AUDIO_API_KEY is not set in .env")
-    return key
+def get_groq_key(device_id: str | None = None) -> str:
+    return _get_provider_key("groq", "GROQ_API_KEY", device_id)
+
+def get_fish_audio_key(device_id: str | None = None) -> str:
+    return _get_provider_key("fish-audio", "FISH_AUDIO_API_KEY", device_id)
+
+def get_nasa_key(device_id: str | None = None) -> str:
+    return _get_provider_key("nasa", "NASA_API_KEY", device_id)
 
 # ── Model Constants ──────────────────────────────────────────────────────────
 
-GEMINI_SCRIPT_MODEL = "gemini-3.6-flash"
+GEMINI_TEXT_MODEL = os.getenv("GEMINI_TEXT_MODEL", "gemini-3.6-flash").strip() or "gemini-3.6-flash"
+GEMINI_SCRIPT_MODEL = GEMINI_TEXT_MODEL
 GEMINI_TTS_MODEL = "gemini-3.1-flash-tts-preview"
 GEMINI_TTS_VOICE = "Kore"
 GROQ_WHISPER_MODEL = "whisper-large-v3-turbo"
