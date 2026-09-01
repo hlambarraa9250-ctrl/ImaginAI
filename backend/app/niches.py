@@ -10,7 +10,7 @@ Defines EXACTLY the 7 core domains and 20 sub-niches verbatim, with 5 required a
 
 from typing import Dict, Any, List
 
-DOMAINS_DATA: List[Dict[str, Any]] = [
+_LEGACY_DOMAINS_DATA: List[Dict[str, Any]] = [
     {
         "id": "mystery_horror",
         "title": "الغموض والرعب",
@@ -265,6 +265,197 @@ DOMAINS_DATA: List[Dict[str, Any]] = [
             },
         ],
     },
+]
+
+
+def _legacy_niche(template_id: str, niche_id: str, title: str, desc: str) -> Dict[str, Any]:
+    """Keep existing niche behavior fields while replacing catalog labels."""
+    for domain in _LEGACY_DOMAINS_DATA:
+        for niche in domain["sub_niches"]:
+            if niche["id"] == template_id:
+                result = dict(niche)
+                result.update({"id": niche_id, "title": title, "desc": desc})
+                return result
+    raise KeyError(f"Unknown niche template: {template_id}")
+
+
+def _domain(
+    template_id: str,
+    title: str,
+    sub_niches: List[Dict[str, Any]],
+) -> Dict[str, Any]:
+    """Keep existing domain presentation metadata for the new catalog."""
+    for domain in _LEGACY_DOMAINS_DATA:
+        if domain["id"] == template_id:
+            result = dict(domain)
+            result.update({"title": title, "sub_niches": sub_niches})
+            return result
+    raise KeyError(f"Unknown domain template: {template_id}")
+
+
+DOMAINS_DATA: List[Dict[str, Any]] = [
+    _domain(
+        "mystery_horror",
+        "الغموض والرعب",
+        [
+            _legacy_niche(
+                "history_mystery",
+                "horror_stories",
+                "قصص رعب",
+                "قصص مخيفة ومرعبة تهدف إلى خلق التوتر والخوف والتشويق.",
+            ),
+            _legacy_niche(
+                "true_crime_mystery",
+                "true_crime",
+                "جرائم حقيقية",
+                "قصص وقضايا جرائم حقيقية مع التركيز على الأحداث والأدلة وتسلسل القضية.",
+            ),
+            _legacy_niche(
+                "strange_natural_phenomena",
+                "strange_phenomena",
+                "ظواهر غريبة",
+                "ظواهر وأحداث غير مألوفة وغامضة يصعب تفسيرها.",
+            ),
+            _legacy_niche(
+                "history_mystery",
+                "abandoned_places",
+                "أماكن مهجورة",
+                "استكشاف الأماكن المهجورة والغامضة وقصصها وما حدث فيها.",
+            ),
+            _legacy_niche(
+                "history_mystery",
+                "conspiracy_theories",
+                "نظريات مؤامرة",
+                "نظريات وادعاءات غامضة حول أحداث أو جهات مع عرضها بشكل محايد.",
+            ),
+        ],
+    ),
+    _domain(
+        "knowledge_history",
+        "المعرفة والتاريخ",
+        [
+            _legacy_niche(
+                "inspiring_biographies",
+                "history",
+                "تاريخ",
+                "أحداث وحضارات وشخصيات وتحولات تاريخية مهمة.",
+            ),
+            _legacy_niche(
+                "historical_anecdotes",
+                "many_in_one",
+                "Many-in-one",
+                "مجموعة من عدة موضوعات أو قصص مرتبطة ضمن فيديو واحد مقسّم إلى أقسام.",
+            ),
+            _legacy_niche(
+                "cultures_customs",
+                "religions_philosophy",
+                "أديان وفلسفة",
+                "أفكار ومعتقدات وفلسفات وأوجه الاختلاف والتشابه بينها بأسلوب معرفي محايد.",
+            ),
+            _legacy_niche(
+                "quick_facts_fast",
+                "quick_facts",
+                "حقائق سريعة",
+                "حقائق قصيرة ومدهشة وغريبة من مجالات مختلفة.",
+            ),
+        ],
+    ),
+    _domain(
+        "science_future",
+        "الأسئلة الافتراضية",
+        [
+            _legacy_niche(
+                "experiments_inventions",
+                "what_if_scientific",
+                "ماذا لو (علمي)",
+                "سيناريوهات علمية افتراضية تستكشف ما قد يحدث إذا تغيرت قاعدة أو ظاهرة في العالم.",
+            ),
+            _legacy_niche(
+                "what_if_comparisons",
+                "what_if_you_were",
+                "ماذا لو كنت",
+                "سيناريوهات افتراضية تضع المشاهد داخل تجربة أو موقف معين وتستكشف ما قد يحدث.",
+            ),
+        ],
+    ),
+    _domain(
+        "life_nature",
+        "الحياة والطبيعة",
+        [
+            _legacy_niche(
+                "strange_creatures_animals",
+                "strange_creatures_animals",
+                "أسرار الحيوانات",
+                "معلومات وسلوكيات وقدرات وحقائق مدهشة عن الحيوانات والكائنات.",
+            ),
+            _legacy_niche(
+                "space_mysteries",
+                "space",
+                "الفضاء",
+                "أسرار الكون والكواكب والنجوم والثقوب السوداء والظواهر الفضائية.",
+            ),
+            _legacy_niche(
+                "strange_creatures_animals",
+                "oceans",
+                "المحيطات",
+                "أسرار أعماق البحار والمخلوقات البحرية والظواهر الغامضة في المحيطات.",
+            ),
+        ],
+    ),
+    _domain(
+        "human_psychology",
+        "الشخصيات والتطوير الذاتي",
+        [
+            _legacy_niche(
+                "inspiring_biographies",
+                "inspiring_biographies",
+                "سير ذاتية ملهمة",
+                "قصص حياة أشخاص مؤثرين، من بداياتهم وتحدياتهم إلى نجاحاتهم وإنجازاتهم.",
+            ),
+            _legacy_niche(
+                "body_language_relationships",
+                "charisma",
+                "الكاريزما",
+                "مهارات وسلوكيات تساعد على تطوير الحضور والثقة والتواصل والتأثير في الآخرين.",
+            ),
+            _legacy_niche(
+                "psychology_self_dev",
+                "applied_psychology",
+                "علم نفس تطبيقي",
+                "شرح السلوك البشري والدوافع والتفكير والعلاقات من منظور علم النفس التطبيقي.",
+            ),
+        ],
+    ),
+    _domain(
+        "business_finance",
+        "المال وقصص الشركات",
+        [
+            _legacy_niche(
+                "companies_wealth",
+                "company_building",
+                "كيف بُنيت شركة",
+                "قصص تأسيس ونمو الشركات وكيف تحولت من فكرة أو مشروع صغير إلى شركة كبيرة.",
+            ),
+            _legacy_niche(
+                "companies_wealth",
+                "company_collapses",
+                "انهيارات شركات",
+                "قصص الشركات التي فشلت أو انهارت، وأسباب ومراحل الانهيار.",
+            ),
+        ],
+    ),
+    _domain(
+        "short_content_fun",
+        "القوائم",
+        [
+            _legacy_niche(
+                "quick_facts_fast",
+                "top_10",
+                "توب 10 (أي مجال)",
+                "فيديوهات قائمة تعرض أفضل أو أغرب أو أهم 10 عناصر في أي موضوع أو مجال.",
+            ),
+        ],
+    ),
 ]
 
 
