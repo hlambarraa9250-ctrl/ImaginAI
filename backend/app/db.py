@@ -111,17 +111,16 @@ def init_db() -> None:
 def get_or_create_device(device_id: str) -> Dict[str, Any]:
     """Get device or create if it doesn't exist."""
     with get_db_connection() as conn:
-        cursor = conn.cursor()
-        cursor.execute("SELECT * FROM devices WHERE device_id = ?", (device_id,))
-        row = cursor.fetchone()
-        
-        if row:
-            return dict(row)
-        
         now = datetime.now(timezone.utc).isoformat()
-        cursor.execute("INSERT INTO devices (device_id, first_seen_at) VALUES (?, ?)", (device_id, now))
+        conn.execute(
+            "INSERT OR IGNORE INTO devices (device_id, first_seen_at) VALUES (?, ?)",
+            (device_id, now),
+        )
+        row = conn.execute(
+            "SELECT * FROM devices WHERE device_id = ?", (device_id,)
+        ).fetchone()
         conn.commit()
-        return {"device_id": device_id, "first_seen_at": now}
+        return dict(row) if row else {"device_id": device_id, "first_seen_at": now}
 
 
 def clear_device_data(device_id: str) -> None:
