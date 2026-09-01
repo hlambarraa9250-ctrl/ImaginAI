@@ -896,7 +896,20 @@ export default function Home() {
 
   // Current active provider voices
   const currentProviderObj = providersCatalog.find((p) => p.provider === selectedProvider) || providersCatalog[0];
-  const currentVoices = currentProviderObj ? currentProviderObj.voices : [];
+  const currentVoices = (() => {
+    if (!currentProviderObj) return [];
+
+    // API catalogs can contain a duplicated voice after merging custom and
+    // provider voices. Normalize here as a final guard before rendering keys.
+    const unique = new Map<string, VoiceItem>();
+    currentProviderObj.voices.forEach((voice, index) => {
+      const voiceId = String(voice.id || "").trim() || `${currentProviderObj.provider}-voice-${index}`;
+      if (!unique.has(voiceId)) {
+        unique.set(voiceId, { ...voice, id: voiceId });
+      }
+    });
+    return Array.from(unique.values());
+  })();
 
   // Progress screen stages config
   const stages = [
