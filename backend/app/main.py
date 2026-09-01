@@ -102,13 +102,15 @@ def get_current_device(request: Request, response: Response) -> str:
     If missing, generate a new UUID, record in SQLite, and set long-term cookie.
     """
     device_id = (
-        request.cookies.get(COOKIE_NAME)
-        or request.headers.get("x-device-id")
+        request.headers.get("x-device-id")
         or request.headers.get("x-visitor-id")
+        or request.cookies.get(COOKIE_NAME)
     )
 
     if not device_id:
         device_id = f"dev_{uuid.uuid4().hex}"
+
+    if request.cookies.get(COOKIE_NAME) != device_id:
         response.set_cookie(
             key=COOKIE_NAME,
             value=device_id,

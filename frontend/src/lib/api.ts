@@ -140,9 +140,14 @@ export async function sendFeedback(message: string, contact?: string): Promise<{
 }
 
 export async function getJobStatus(jobId: string): Promise<JobStatusResponse> {
+  const visitorId = getOrCreateVisitorId();
   const resp = await fetch(`${API_BASE}/api/jobs/${jobId}/status`, {
     cache: "no-store",
     credentials: "include",
+    headers: {
+      "x-visitor-id": visitorId,
+      "x-device-id": visitorId,
+    },
   });
   if (!resp.ok) {
     throw new Error(`Failed to fetch job status: ${resp.statusText}`);
