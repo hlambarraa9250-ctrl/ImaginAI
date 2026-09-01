@@ -119,7 +119,11 @@ def _build_system_prompt(duration_cfg: dict, style: str, niche_id: str | None = 
         info = find_niche_info(niche_id or custom_niche or "")
         if info:
             script_style = info.get("script_style", "")
-            niche_prompt = f"\n- NICHE SPECIFIC INSTRUCTION ({info.get('title', custom_niche)}): {script_style}"
+            niche_prompt = (
+                f"\n- NICHE-SPECIFIC RULES ({info.get('title', custom_niche)}): {script_style}"
+                "\n- NICHE PRIORITY: These selected-niche rules are authoritative. Do not blend them with another niche's narrative style. "
+                "Use the general style only when it does not conflict with the selected niche."
+            )
 
             overlay_type = info.get("section_overlay_type")
             if overlay_type == "numbered":
@@ -274,7 +278,10 @@ async def expand_script_scenes(
         from app.niches import find_niche_info
         niche_info = find_niche_info(niche_id)
         if niche_info:
-            niche_instruction = f"\n- NICHE SPECIFIC INSTRUCTION: {niche_info.get('script_style', '')}"
+            niche_instruction = (
+                f"\n- NICHE-SPECIFIC RULES ({niche_info.get('title', niche_id)}): {niche_info.get('script_style', '')}"
+                "\n- NICHE PRIORITY: Continue using only this selected niche's narrative rules; do not switch to another niche's format."
+            )
 
     system = f"""You are a professional video script writer extending an existing script on the topic/idea.
 Rules:

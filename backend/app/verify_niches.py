@@ -2,7 +2,7 @@
 Verification Script for ImaginAI Niche Data
 Checks that:
 1. Total domains == 7
-2. Total sub-niches == 20
+2. Total sub-niches == 22
 3. All 5 required fields (title, script_style, sources, music_mood, clip_duration_limit) are non-empty for every sub-niche.
 """
 
@@ -45,8 +45,8 @@ def run_verification():
     print("\n" + "=" * 50)
     print(f"[*] Total Sub-niches Count: {total_sub_niches}")
 
-    if total_sub_niches != 20:
-        print(f"[ERROR] Expected 20 sub-niches, found {total_sub_niches}")
+    if total_sub_niches != 22:
+        print(f"[ERROR] Expected 22 sub-niches, found {total_sub_niches}")
         sys.exit(1)
 
     if errors:
@@ -55,7 +55,7 @@ def run_verification():
             print(f" - {e}")
         sys.exit(1)
 
-    print("[SUCCESS] All 7 domains and 20 sub-niches are 100% verified with all 5 required fields!")
+    print("[SUCCESS] All 7 domains and 22 sub-niches are 100% verified with all 5 required fields!")
 
 if __name__ == "__main__":
     run_verification()
