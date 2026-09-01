@@ -316,6 +316,32 @@ NICHE_SCRIPT_RULES: Dict[str, str] = {
 }
 
 
+NICHE_SOURCE_PRIORITY: Dict[str, List[str]] = {
+    "horror_stories": ["pexels_video", "pixabay_video"],
+    "true_crime": ["archive_org", "wikimedia", "pexels_video", "pixabay_video"],
+    "strange_phenomena": ["pexels_video", "pixabay_video"],
+    "abandoned_places": ["pexels_video", "pixabay_video"],
+    "conspiracy_theories": ["pexels_video", "pixabay_video"],
+    "history": ["wikimedia", "archive_org", "loc", "pexels_video", "pixabay_video"],
+    "many_in_one": ["wikimedia", "archive_org", "loc", "pexels_video", "pixabay_video"],
+    "religions_philosophy": ["wikimedia", "pexels_video", "pixabay_video"],
+    "quick_facts": ["pexels_video", "pixabay_video"],
+    "what_if_scientific": ["pexels_video", "pixabay_video"],
+    "what_if_you_were": ["pexels_video", "pixabay_video"],
+    "strange_creatures_animals": ["pexels_video", "pixabay_video"],
+    "space": ["nasa_image_library", "nasa_apod", "pexels_video", "pixabay_video"],
+    "oceans": ["pexels_video", "pixabay_video"],
+    "inspiring_biographies": ["pexels_video", "pixabay_video"],
+    "charisma": ["pexels_video", "pixabay_video"],
+    "applied_psychology": ["pexels_video", "pixabay_video"],
+    "motivational": ["pexels_video", "pixabay_video"],
+    "study_techniques": ["pexels_video", "pixabay_video"],
+    "company_building": ["pexels_video", "pixabay_video"],
+    "company_collapses": ["pexels_video", "pixabay_video"],
+    "top_10": [],
+}
+
+
 def _legacy_niche(template_id: str, niche_id: str, title: str, desc: str) -> Dict[str, Any]:
     """Keep existing niche behavior fields while replacing catalog labels."""
     for domain in _LEGACY_DOMAINS_DATA:
@@ -325,6 +351,11 @@ def _legacy_niche(template_id: str, niche_id: str, title: str, desc: str) -> Dic
                 result.update({"id": niche_id, "title": title, "desc": desc})
                 if niche_id in NICHE_SCRIPT_RULES:
                     result["script_style"] = NICHE_SCRIPT_RULES[niche_id]
+                source_priority = NICHE_SOURCE_PRIORITY.get(niche_id)
+                if source_priority:
+                    result["sources"] = ", ".join(source_priority)
+                elif niche_id == "top_10":
+                    result["sources"] = "inherit_from_original_niche"
                 return result
     raise KeyError(f"Unknown niche template: {template_id}")
 
@@ -550,6 +581,19 @@ def get_niche_overlay_type(niche_id_or_title: str) -> str | None:
 def get_all_niches() -> List[Dict[str, Any]]:
     """Return list of all 7 domain categories and 22 sub-niches."""
     return DOMAINS_DATA
+
+
+def get_niche_source_priority(niche_id: str | None) -> List[str]:
+    """Return the configured source order for a catalog niche."""
+    if not niche_id:
+        return []
+    if niche_id in NICHE_SOURCE_PRIORITY:
+        return list(NICHE_SOURCE_PRIORITY[niche_id])
+    for domain in DOMAINS_DATA:
+        for niche in domain["sub_niches"]:
+            if niche["title"] == niche_id:
+                return list(NICHE_SOURCE_PRIORITY.get(niche["id"], []))
+    return []
 
 
 def find_niche_info(niche_id: str) -> Dict[str, Any] | None:
