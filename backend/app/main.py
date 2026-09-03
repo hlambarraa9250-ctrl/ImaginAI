@@ -267,18 +267,6 @@ async def api_stream_video(video_id: str, device_id: str = Depends(get_current_d
 async def list_voices(device_id: str = Depends(get_current_device)):
     """Return available TTS providers and voices catalog, including user's custom cloned voices."""
     from app.services.fish_audio_tts import fetch_fish_audio_voices
-
-    def dedupe_voices(voices: list[dict]) -> list[dict]:
-        """Keep the first voice for each id so custom voices take precedence."""
-        unique: list[dict] = []
-        seen_ids: set[str] = set()
-        for voice in voices:
-            voice_id = str(voice.get("id") or "").strip()
-            if not voice_id or voice_id in seen_ids:
-                continue
-            seen_ids.add(voice_id)
-            unique.append(voice)
-        return unique
     
     # Clone catalog list
     providers = json.loads(json.dumps(VOICE_PROVIDERS))
@@ -300,7 +288,7 @@ async def list_voices(device_id: str = Depends(get_current_device)):
         })
 
     if fish_voices or custom_voices_list:
-        combined_fish = dedupe_voices(custom_voices_list + (fish_voices or []))
+        combined_fish = custom_voices_list + (fish_voices or [])
         for p in providers:
             if p.get("provider") == "fish-audio":
                 p["voices"] = combined_fish

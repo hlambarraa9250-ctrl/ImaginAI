@@ -13,42 +13,11 @@ import math
 import subprocess
 import time
 from pathlib import Path
-from urllib.parse import urlparse
 
 import httpx
 
 from app.config import get_pexels_key, get_pixabay_key, get_nasa_key, STYLE_MAX_SHOT_DURATION
 from app.models import ScriptScene
-
-
-DEFAULT_SOURCE_PRIORITY = ["pexels_video", "pixabay_video"]
-
-_TOP10_SOURCE_HINTS = {
-    "space": ["nasa_image_library", "nasa_apod", "pexels_video", "pixabay_video"],
-    "planet": ["nasa_image_library", "nasa_apod", "pexels_video", "pixabay_video"],
-    "galaxy": ["nasa_image_library", "nasa_apod", "pexels_video", "pixabay_video"],
-    "animal": ["pexels_video", "pixabay_video"],
-    "wildlife": ["pexels_video", "pixabay_video"],
-    "ocean": ["pexels_video", "pixabay_video"],
-    "underwater": ["pexels_video", "pixabay_video"],
-    "sea": ["pexels_video", "pixabay_video"],
-    "history": ["wikimedia", "archive_org", "loc", "pexels_video", "pixabay_video"],
-    "historical": ["wikimedia", "archive_org", "loc", "pexels_video", "pixabay_video"],
-    "ancient": ["wikimedia", "archive_org", "loc", "pexels_video", "pixabay_video"],
-    "abandoned": ["pexels_video", "pixabay_video"],
-    "ruins": ["pexels_video", "pixabay_video"],
-    "crime": ["archive_org", "wikimedia", "pexels_video", "pixabay_video"],
-    "religion": ["wikimedia", "pexels_video", "pixabay_video"],
-}
-
-
-def _top10_source_priority(keywords: list[str]) -> list[str]:
-    """Infer the original topic niche for Top 10 footage when keywords reveal it."""
-    text = " ".join(keywords).lower()
-    for hint, priority in _TOP10_SOURCE_HINTS.items():
-        if hint in text:
-            return list(priority)
-    return list(DEFAULT_SOURCE_PRIORITY)
 
 
 # ── Pixabay cache (24h requirement) ─────────────────────────────────────────
@@ -108,78 +77,6 @@ def _is_landscape(path: str) -> bool:
     return width > 0 and height > 0 and height <= width
 
 
-def _is_valid_download_url(url: object) -> bool:
-    """Reject missing, malformed, or non-HTTP(S) media URLs before downloading."""
-    if not isinstance(url, str) or not url.strip():
-        return False
-    parsed = urlparse(url.strip())
-    return parsed.scheme in {"http", "https"} and bool(parsed.netloc)
-
-
-def _probe_video_file(path: str) -> tuple[int, int, float] | None:
-    """Return (width, height, duration) only for a valid video stream."""
-    try:
-        result = subprocess.run(
-            [
-                "ffprobe", "-v", "error",
-                "-select_streams", "v:0",
-                "-show_entries", "stream=codec_type,width,height:format=duration",
-                "-of", "json",
-                path,
-            ],
-            capture_output=True,
-            text=True,
-            timeout=30,
-        )
-        if result.returncode != 0:
-            return None
-        data = json.loads(result.stdout or "{}")
-        stream = (data.get("streams") or [{}])[0]
-        if stream.get("codec_type") != "video":
-            return None
-        width = int(stream.get("width") or 0)
-        height = int(stream.get("height") or 0)
-        duration = float((data.get("format") or {}).get("duration") or 0)
-        if width <= 0 or height <= 0 or duration <= 0:
-            return None
-        return width, height, duration
-    except Exception as exc:
-        print(f"[Footage] Video validation failed for {path}: {exc}")
-        return None
-
-
-def _is_valid_image_file(path: str) -> bool:
-    """Validate an image using its actual file signature/MIME type."""
-    try:
-        result = subprocess.run(
-            ["file", "--brief", "--mime-type", path],
-            capture_output=True,
-            text=True,
-            timeout=10,
-        )
-        return result.returncode == 0 and result.stdout.strip().lower().startswith("image/")
-    except Exception as exc:
-        print(f"[Footage] Image validation failed for {path}: {exc}")
-        return False
-
-
-def _validate_media_file(path: str, is_image: bool) -> bool:
-    """Require a non-empty readable image or a probeable video with valid dimensions."""
-    media_path = Path(path)
-    if not media_path.is_file() or media_path.stat().st_size <= 0:
-        return False
-    if is_image:
-        return _is_valid_image_file(path)
-    probed = _probe_video_file(path)
-    if not probed:
-        return False
-    width, height, _duration = probed
-    if height > width:
-        print(f"[Footage] Rejected vertical video: {width}x{height} for {path}")
-        return False
-    return True
-
-
 # ── Pexels search ───────────────────────────────────────────────────────────
 
 async def _search_pexels(keywords: list[str], min_duration: float, client: httpx.AsyncClient, device_id: str | None = None) -> list[dict]:
@@ -206,7 +103,7 @@ async def _search_pexels(keywords: list[str], min_duration: float, client: httpx
             chosen = hd_files[0] if hd_files else (files[0] if files else None)
             if chosen:
                 results.append({
-                    "source": "pexels_video",
+                    "source": "pexels",
                     "download_url": chosen["link"],
                     "width": chosen.get("width"),
                     "height": chosen.get("height"),
@@ -254,7 +151,7 @@ async def _search_pixabay(keywords: list[str], min_duration: float, client: http
             chosen = videos.get("large") or videos.get("medium") or videos.get("small")
             if chosen:
                 results.append({
-                    "source": "pixabay_video",
+                    "source": "pixabay",
                     "download_url": chosen["url"],
                     "width": chosen.get("width"),
                     "height": chosen.get("height"),
@@ -407,7 +304,6 @@ async def _search_wikimedia(keywords: list[str], client: httpx.AsyncClient) -> l
                 height = info.get("height", 0)
                 mime = info.get("mime", "")
                 ext = info.get("extmetadata", {})
-                is_image = "video" not in mime.lower()
                 
                 # Mandatory license filtering condition
                 lic_valid = _is_valid_license(ext)
@@ -422,7 +318,7 @@ async def _search_wikimedia(keywords: list[str], client: httpx.AsyncClient) -> l
                             "height": height,
                             "duration": 0,
                             "attribution": f"Media by {artist} from Wikimedia Commons",
-                            "is_image": is_image,
+                            "is_image": True,
                         })
                     else:
                         rejected_count += 1
@@ -542,7 +438,7 @@ async def _search_nasa(keywords: list[str], client: httpx.AsyncClient) -> list[d
                         break
                 if img_url:
                     results.append({
-                        "source": "nasa_image_library",
+                        "source": "nasa",
                         "download_url": img_url,
                         "width": 1920,
                         "height": 1080,
@@ -609,8 +505,6 @@ async def _download_video(url: str, output_path: str, client: httpx.AsyncClient,
                         if total > 350 * 1024 * 1024:
                             raise RuntimeError("Downloaded media exceeds the 350 MB safety limit.")
                         f.write(chunk)
-                if total <= 0 or not Path(output_path).is_file() or Path(output_path).stat().st_size <= 0:
-                    raise RuntimeError("Downloaded media is empty.")
             print(f"[Footage] Downloaded to {output_path} (attempt {attempt})")
             return
         except Exception as e:
@@ -639,7 +533,6 @@ async def fetch_footage_for_shot(
     used_urls: set[str],
     source_priority: list[str] | None = None,
     device_id: str | None = None,
-    niche_id: str | None = None,
 ) -> str:
     """Fetch one validated horizontal asset using the niche's source priority."""
     searchers = {
@@ -650,88 +543,88 @@ async def fetch_footage_for_shot(
         "wikimedia": lambda: _search_wikimedia(keywords, client),
         "archive_org": lambda: _search_archive_org(keywords, client),
         "loc": lambda: _search_loc(keywords, client),
-        "nasa_image_library": lambda: _search_nasa(keywords, client),
         "nasa": lambda: _search_nasa(keywords, client),
         "nasa_apod": lambda: _search_nasa_apod(client, device_id),
     }
-    if niche_id in {"top_10", "توب 10 (أي مجال)"}:
-        priority = _top10_source_priority(keywords)
-    elif source_priority:
-        priority = source_priority
-    else:
-        priority = list(DEFAULT_SOURCE_PRIORITY)
-
-    # Search and validate each source in order. A source is not successful
-    # until at least one of its downloaded candidates passes media validation.
-    attempted_sources: list[str] = []
+    priority = source_priority or [
+        "pexels_video", "pixabay_video", "pexels_image", "pixabay_image",
+        "wikimedia", "archive_org", "loc", "nasa", "nasa_apod",
+    ]
+    candidates = []
     for source in priority:
         searcher = searchers.get(source)
         if not searcher:
-            print(f"[Footage] Unknown source '{source}', skipping.")
             continue
-        attempted_sources.append(source)
         try:
             candidates = await searcher()
         except Exception as exc:
             print(f"[Footage] Source '{source}' unavailable: {exc}")
-            continue
+        if candidates:
+            break
+
+    # 10. Single broader keyword fallbacks
+    if not candidates:
+        for kw in keywords:
+            candidates = await _search_pexels([kw], min_duration, client, device_id)
+            if candidates:
+                break
         if not candidates:
-            print(f"[Footage] Source '{source}' returned no candidates; trying next source.")
+            for kw in keywords:
+                candidates = await _search_pexels_images([kw], client, device_id)
+                if candidates:
+                    break
+
+    if not candidates:
+        raise RuntimeError(f"No footage or image found for keywords: {keywords}")
+
+    # Try downloading candidates sequentially until one succeeds
+    downloaded_successfully = False
+    chosen = None
+    final_output_path = output_path
+
+    # Prioritize candidates not yet used
+    ordered_candidates = [c for c in candidates if c["download_url"] not in used_urls] + [c for c in candidates if c["download_url"] in used_urls]
+
+    for cand in ordered_candidates:
+        is_image = cand.get("is_image", False)
+        target_path = output_path
+        if is_image and not target_path.lower().endswith((".jpg", ".jpeg", ".png", ".webp")):
+            target_path = str(Path(output_path).with_suffix(".jpg"))
+
+        try:
+            await _download_video(cand["download_url"], target_path, client)
+            
+            # Every downloaded asset must be a real, probeable horizontal file.
+            if not _is_landscape(target_path):
+                print(f"[Footage] Clip was not landscape ({target_path}), trying next candidate...")
+                Path(target_path).unlink(missing_ok=True)
+                continue
+                
+            chosen = cand
+            final_output_path = target_path
+            used_urls.add(chosen["download_url"])
+            downloaded_successfully = True
+            print(f"[Footage] [Shot Source Resolution] Source='{chosen['source']}' ({'IMAGE' if chosen.get('is_image') else 'VIDEO'}) for keywords={keywords}")
+            break
+        except Exception as dl_err:
+            print(f"[Footage] Candidate download failed ({cand['download_url']}): {dl_err}. Trying next candidate...")
             continue
 
-        ordered_candidates = [
-            c for c in candidates
-            if _is_valid_download_url(c.get("download_url")) and c["download_url"] not in used_urls
-        ] + [
-            c for c in candidates
-            if _is_valid_download_url(c.get("download_url")) and c["download_url"] in used_urls
-        ]
+    if not downloaded_successfully or not chosen:
+        raise RuntimeError(
+            f"All configured footage sources returned invalid or unavailable media for keywords: {keywords}"
+        )
 
-        for cand in ordered_candidates:
-            is_image = bool(cand.get("is_image", False))
-            target_path = output_path
-            if is_image and not target_path.lower().endswith((".jpg", ".jpeg", ".png", ".webp")):
-                target_path = str(Path(output_path).with_suffix(".jpg"))
+    # Save attribution
+    attr_data = {
+        "source": chosen["source"],
+        "attribution": chosen["attribution"],
+        "keywords": keywords,
+        "is_image": chosen.get("is_image", False),
+    }
+    Path(attr_path).write_text(json.dumps(attr_data, ensure_ascii=False, indent=2), encoding="utf-8")
 
-            try:
-                await _download_video(cand["download_url"], target_path, client)
-                if not _validate_media_file(target_path, is_image):
-                    print(
-                        f"[Footage] Rejected invalid "
-                        f"{'image' if is_image else 'video'} from '{source}'; trying next candidate."
-                    )
-                    Path(target_path).unlink(missing_ok=True)
-                    continue
-
-                used_urls.add(cand["download_url"])
-                attr_data = {
-                    "source": cand.get("source", source),
-                    "attribution": cand.get("attribution", ""),
-                    "keywords": keywords,
-                    "is_image": is_image,
-                }
-                Path(attr_path).write_text(
-                    json.dumps(attr_data, ensure_ascii=False, indent=2),
-                    encoding="utf-8",
-                )
-                print(
-                    f"[Footage] [Shot Source Resolution] Source='{cand.get('source', source)}' "
-                    f"({'IMAGE' if is_image else 'VIDEO'}) for keywords={keywords}"
-                )
-                return target_path
-            except Exception as dl_err:
-                print(
-                    f"[Footage] Candidate from '{source}' failed validation/download: "
-                    f"{dl_err}. Trying next candidate..."
-                )
-                Path(target_path).unlink(missing_ok=True)
-
-        print(f"[Footage] All candidates from '{source}' failed; trying next source.")
-
-    raise RuntimeError(
-        f"All configured footage sources failed ({', '.join(attempted_sources) or 'none'}) "
-        f"for keywords: {keywords}"
-    )
+    return final_output_path
 
 
 
@@ -758,8 +651,10 @@ async def fetch_all_footage(
     used_urls: set[str] = set()
     source_priority = None
     if niche_id:
-        from app.niches import get_niche_source_priority
-        source_priority = get_niche_source_priority(niche_id)
+        from app.niches import find_niche_info
+        niche_info = find_niche_info(niche_id)
+        if niche_info:
+            source_priority = [item.strip() for item in niche_info.get("sources", "").split(",") if item.strip()]
 
     async with httpx.AsyncClient() as client:
         for scene_idx, scene in enumerate(scenes):
@@ -793,7 +688,6 @@ async def fetch_all_footage(
                     used_urls=used_urls,
                     source_priority=source_priority,
                     device_id=device_id,
-                    niche_id=niche_id,
                 )
                 scene_clip_paths.append(resolved_output)
 
