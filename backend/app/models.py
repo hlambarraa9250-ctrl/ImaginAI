@@ -60,6 +60,8 @@ class JobRequest(BaseModel):
     voice: str = Field("ar-SA-HamedNeural", description="TTS voice identifier")
     niche_id: Optional[str] = Field(None, description="Selected sub-niche ID")
     custom_niche: Optional[str] = Field(None, description="Custom user-written niche if not in catalog")
+    custom_niche_description: Optional[str] = Field(None, max_length=2000, description="Description of a custom niche")
+    niche_sources: Optional[list[str]] = Field(None, description="Preferred media source IDs for this niche")
     music_track: Optional[str] = Field("auto", description="Background music selection: auto, none, or track_id")
     domain: Optional[str] = Field(None, description="Domain name e.g. الغموض والرعب")
     niche: Optional[str] = Field(None, description="Niche name e.g. قصص رعب")
@@ -90,6 +92,7 @@ class EditedScene(BaseModel):
 
 class ResumeJobRequest(BaseModel):
     edited_scenes: list[EditedScene] = Field(default_factory=list)
+    license_review_confirmed: bool = False
 
 
 class SectionApprovalRequest(BaseModel):
@@ -97,13 +100,19 @@ class SectionApprovalRequest(BaseModel):
 
 
 class ApiKeySaveRequest(BaseModel):
-    provider: Literal["gemini", "fish-audio", "pexels", "pixabay", "nasa", "groq"]
+    provider: Literal["gemini", "fish-audio", "pexels", "pixabay", "nasa", "groq", "coverr", "nara"]
     api_key: str = Field(..., min_length=1, max_length=500)
 
 
 class ApiKeyTestRequest(BaseModel):
-    provider: Literal["gemini", "fish-audio", "pexels", "pixabay", "nasa", "groq"]
+    provider: Literal["gemini", "fish-audio", "pexels", "pixabay", "nasa", "groq", "coverr", "nara"]
     key_id: str = Field(..., min_length=1, max_length=100)
+
+
+class VideoSourceSearchRequest(BaseModel):
+    keywords: list[str] = Field(..., min_length=1, max_length=12)
+    source_ids: Optional[list[str]] = Field(None, max_length=10)
+    limit: int = Field(20, ge=1, le=50)
 
 
 # ── Internal data ────────────────────────────────────────────────────────────

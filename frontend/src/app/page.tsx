@@ -60,9 +60,11 @@ import {
   resumeJob,
   approveJobSections,
   getApiKeySettings,
+  getVideoSources,
   saveApiKey,
   deleteApiKey,
   testApiKey,
+  testVideoSource,
   ReviewData,
   CustomFont,
   JobStatusResponse, 
@@ -72,7 +74,8 @@ import {
   SubNiche,
   Project,
   VideoItem,
-  ApiKeySettings
+  ApiKeySettings,
+  VideoSourceInfo
 } from "../lib/api";
 
 type ScreenState = "dashboard" | "settings" | "wizard_step1" | "wizard_step2" | "wizard_step3" | "input" | "voice" | "progress" | "review" | "result";
@@ -119,6 +122,10 @@ export default function Home() {
   const [selectedDomain, setSelectedDomain] = useState<DomainCategory | null>(null);
   const [selectedNiche, setSelectedNiche] = useState<SubNiche | null>(null);
   const [customNicheText, setCustomNicheText] = useState<string>("");
+  const [customNicheDescription, setCustomNicheDescription] = useState("");
+  const [customNicheSources, setCustomNicheSources] = useState<string[]>([
+    "archive_org", "loc", "wikimedia", "nasa", "pixabay_video", "pexels_video",
+  ]);
   const [isCustomNicheActive, setIsCustomNicheActive] = useState<boolean>(false);
   const [creatingProject, setCreatingProject] = useState<boolean>(false);
 
@@ -147,6 +154,7 @@ export default function Home() {
 
   // Captions Customization State (Enhanced for Free Color Picker & CapCut Effects)
   const [captionConfig, setCaptionConfig] = useState({
+    enabled: true,
     color: "#FFFFFF",
     highlight_color: "#FACC15",
     effect: "none",
@@ -168,6 +176,7 @@ export default function Home() {
   // Review Stage State
   const [reviewData, setReviewData] = useState<ReviewData | null>(null);
   const [editedScenesMap, setEditedScenesMap] = useState<Record<number, string>>({});
+  const [licenseReviewConfirmed, setLicenseReviewConfirmed] = useState(false);
   const [resumingJob, setResumingJob] = useState<boolean>(false);
   const [reviewError, setReviewError] = useState<string | null>(null);
 
@@ -211,6 +220,9 @@ export default function Home() {
   const [apiKeyInputs, setApiKeyInputs] = useState<Record<string, string>>({});
   const [apiKeyBusy, setApiKeyBusy] = useState<string | null>(null);
   const [apiKeyMessage, setApiKeyMessage] = useState<string | null>(null);
+  const [videoSourceSettings, setVideoSourceSettings] = useState<VideoSourceInfo[]>([]);
+  const [videoSourceTests, setVideoSourceTests] = useState<Record<string, { status: string; message: string }>>({});
+  const [videoSourceBusy, setVideoSourceBusy] = useState<string | null>(null);
 
   // ── Voice Recording & Cloning Handlers (Fish Audio) ────────────────────────
   const handleStartRecording = async () => {
@@ -345,6 +357,30 @@ export default function Home() {
     }
   };
 
+  const loadVideoSourceSettings = async () => {
+    try {
+      const result = await getVideoSources();
+      setVideoSourceSettings(result.sources || []);
+    } catch (err) {
+      console.error("Failed to load video source status:", err);
+    }
+  };
+
+  const handleTestVideoSource = async (sourceId: string) => {
+    setVideoSourceBusy(sourceId);
+    try {
+      const result = await testVideoSource(sourceId);
+      setVideoSourceTests((previous) => ({ ...previous, [sourceId]: result }));
+    } catch (err: any) {
+      setVideoSourceTests((previous) => ({
+        ...previous,
+        [sourceId]: { status: "unavailable", message: err.message || "تعذر اختبار المصدر." },
+      }));
+    } finally {
+      setVideoSourceBusy(null);
+    }
+  };
+
   const providerLabels: Record<string, string> = {
     gemini: "Gemini (السكريبت والصوت)",
     "fish-audio": "Fish Audio",
@@ -352,6 +388,8 @@ export default function Home() {
     pixabay: "Pixabay",
     nasa: "NASA",
     groq: "Groq Whisper",
+    coverr: "Coverr (اختياري، معطّل افتراضياً)",
+    nara: "الأرشيف الوطني الأمريكي (NARA)",
   };
 
   const handleSaveApiKey = async (provider: string) => {
@@ -363,6 +401,8 @@ export default function Home() {
       await saveApiKey(provider, value);
       setApiKeyInputs((prev) => ({ ...prev, [provider]: "" }));
       await loadApiKeySettings();
+      await loadVideoSourceSettings();
+      setVideoSourceTests({});
       setApiKeyMessage("تم حفظ المفتاح بشكل مشفّر. اختبره للتأكد من صلاحيته.");
     } catch (err: any) {
       setApiKeyMessage(err.message || "تعذر حفظ المفتاح.");
@@ -377,6 +417,7 @@ export default function Home() {
     try {
       const result = await testApiKey(provider, keyId);
       await loadApiKeySettings();
+      await loadVideoSourceSettings();
       setApiKeyMessage(result.message || `حالة الاختبار: ${result.status}`);
     } catch (err: any) {
       setApiKeyMessage(err.message || "تعذر اختبار المفتاح.");
@@ -390,6 +431,8 @@ export default function Home() {
     try {
       await deleteApiKey(provider, keyId);
       await loadApiKeySettings();
+      await loadVideoSourceSettings();
+      setVideoSourceTests({});
     } catch (err: any) {
       setApiKeyMessage(err.message || "تعذر حذف المفتاح.");
     } finally {
@@ -446,8 +489,9 @@ export default function Home() {
   }, []);
 
   useEffect(() => {
-    if (screen === "settings" && !apiKeySettings) {
-      loadApiKeySettings();
+    if (screen === "settings") {
+      if (!apiKeySettings) loadApiKeySettings();
+      loadVideoSourceSettings();
     }
   }, [screen, apiKeySettings]);
 
@@ -485,6 +529,7 @@ export default function Home() {
           try {
             const rev = await getJobReviewData(id);
             setReviewData(rev);
+            setLicenseReviewConfirmed(false);
             const initialMap: Record<number, string> = {};
             rev.scenes.forEach((s) => {
               initialMap[s.scene_index] = s.narration;
@@ -606,7 +651,7 @@ export default function Home() {
         scene_index: sc.scene_index,
         narration: editedScenesMap[sc.scene_index] ?? sc.narration,
       }));
-      await resumeJob(statusData.job_id, payload);
+      await resumeJob(statusData.job_id, payload, licenseReviewConfirmed);
       setScreen("progress");
       startPolling(statusData.job_id);
     } catch (err: any) {
@@ -658,7 +703,7 @@ export default function Home() {
     let nicheIdToUse = "";
 
     if (isCustomNicheActive) {
-      if (!customNicheText.trim()) return;
+      if (!customNicheText.trim() || !customNicheDescription.trim() || customNicheSources.length === 0) return;
       nicheIdToUse = customNicheText.trim();
     } else {
       if (!selectedNiche) return;
@@ -674,6 +719,15 @@ export default function Home() {
       });
 
       setActiveProject(proj);
+      if (isCustomNicheActive) {
+        localStorage.setItem(
+          `imaginai_project_niche_${proj.project_id}`,
+          JSON.stringify({
+            description: customNicheDescription.trim(),
+            sources: customNicheSources,
+          }),
+        );
+      }
       await fetchAllProjects();
       await loadProjectVideos(proj.project_id);
 
@@ -723,6 +777,13 @@ export default function Home() {
 
     try {
       const finalIdea = inputMode === "script_provided" ? providedScript.trim().slice(0, 80) : idea.trim();
+      let nichePreferences: { description?: string; sources?: string[] } = {};
+      try {
+        const savedPreferences = localStorage.getItem(`imaginai_project_niche_${activeProject.project_id}`);
+        if (savedPreferences) nichePreferences = JSON.parse(savedPreferences);
+      } catch {
+        nichePreferences = {};
+      }
       const res = await createJob({
         idea: finalIdea,
         duration: inputMode === "script_provided" ? "5_min" : duration,
@@ -733,6 +794,8 @@ export default function Home() {
         domain: activeProject.domain,
         niche: activeProject.niche,
         project_id: activeProject.project_id,
+        custom_niche_description: nichePreferences.description,
+        niche_sources: nichePreferences.sources,
         music_track: selectedMusic,
         caption_config: captionConfig,
         input_mode: inputMode,
@@ -896,7 +959,14 @@ export default function Home() {
 
   // Current active provider voices
   const currentProviderObj = providersCatalog.find((p) => p.provider === selectedProvider) || providersCatalog[0];
-  const currentVoices = currentProviderObj ? currentProviderObj.voices : [];
+  const currentVoices = Array.from(
+    new Map((currentProviderObj?.voices || []).map((voice) => [String(voice.id), voice])).values()
+  );
+  const hasUnclearedLicense = Boolean(
+    reviewData?.scenes.some((scene) =>
+      scene.shots.some((shot) => shot.metadata?.rightsStatus !== "valid")
+    )
+  );
 
   // Progress screen stages config
   const stages = [
@@ -1189,6 +1259,52 @@ export default function Home() {
                   );
                 })}
               </div>
+
+              <div className="mt-6 border-t border-neutral-800 pt-5">
+                <div className="mb-3 text-right">
+                  <h3 className="text-sm font-bold text-white">حالة مصادر الفيديو</h3>
+                  <p className="mt-1 text-[11px] leading-relaxed text-neutral-500">
+                    لا يظهر المصدر كمتصل إلا بعد نجاح اختبار مباشر. لا تُعرض أي مفاتيح هنا.
+                  </p>
+                </div>
+                <div className="space-y-2">
+                  {videoSourceSettings.map((source) => {
+                    const lastTest = videoSourceTests[source.id];
+                    const status = lastTest?.status || source.connectionStatus;
+                    const statusLabel =
+                      status === "valid" ? "اتصال ناجح" :
+                      status === "invalid" || status === "unauthorized" ? "فشل التحقق" :
+                      status === "unavailable" ? "غير متاح حالياً" :
+                      status === "not_configured" || status === "missing_key" ? "يتطلب مفتاحاً" :
+                      status === "disabled" ? "معطّل" :
+                      status === "configured_not_tested" ? "مفتاح محفوظ — لم يُختبر" :
+                      "لم يُختبر بعد";
+                    const connected = status === "valid";
+                    return (
+                      <div key={source.id} className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-neutral-800 bg-[#181818] p-3">
+                        <div className="text-right">
+                          <div className="text-xs font-bold text-white">{source.label}</div>
+                          <div className={`mt-1 text-[10px] ${connected ? "text-emerald-400" : "text-neutral-400"}`}>
+                            {statusLabel}
+                          </div>
+                          {lastTest?.message && <div className="mt-1 text-[10px] text-neutral-500">{lastTest.message}</div>}
+                        </div>
+                        <button
+                          onClick={() => handleTestVideoSource(source.id)}
+                          disabled={videoSourceBusy !== null || status === "disabled" || status === "missing_key" || status === "not_configured"}
+                          className="rounded-lg border border-amber-500/30 px-3 py-1.5 text-[10px] font-bold text-amber-300 hover:bg-amber-500/10 disabled:opacity-40"
+                        >
+                          {videoSourceBusy === source.id ? "يُختبر..." : "اختبار الاتصال"}
+                        </button>
+                      </div>
+                    );
+                  })}
+                  {videoSourceSettings.length === 0 && (
+                    <div className="text-right text-[11px] text-neutral-500">جارٍ تحميل قائمة المصادر...</div>
+                  )}
+                </div>
+              </div>
+
               <p className="text-[11px] text-neutral-500 mt-5 leading-relaxed">
                 لا تضع مفاتيح حقيقية في ملفات المشروع أو في المحادثة. اختبارات المفاتيح ترسل طلباً واحداً منخفض التكلفة فقط.
               </p>
@@ -1358,14 +1474,54 @@ export default function Home() {
                 </p>
 
                 {isCustomNicheActive && (
-                  <input
-                    type="text"
-                    placeholder="اكتب اسم النيتش المخصص هنا..."
-                    value={customNicheText}
-                    onChange={(e) => setCustomNicheText(e.target.value)}
-                    className="w-full bg-[#1c1c1c] border border-purple-800 rounded-lg px-3 py-2 text-xs text-white focus:outline-none focus:border-purple-500"
-                    onClick={(e) => e.stopPropagation()}
-                  />
+                  <div className="space-y-3" onClick={(e) => e.stopPropagation()}>
+                    <input
+                      type="text"
+                      placeholder="اكتب اسم النيتش المخصص هنا..."
+                      value={customNicheText}
+                      onChange={(e) => setCustomNicheText(e.target.value)}
+                      className="w-full bg-[#1c1c1c] border border-purple-800 rounded-lg px-3 py-2 text-xs text-white focus:outline-none focus:border-purple-500"
+                    />
+                    <textarea
+                      required
+                      minLength={5}
+                      maxLength={2000}
+                      rows={3}
+                      placeholder="اشرح نوع القصص أو المعلومات والجمهور الذي يستهدفه النيتش..."
+                      value={customNicheDescription}
+                      onChange={(e) => setCustomNicheDescription(e.target.value)}
+                      className="w-full resize-y bg-[#1c1c1c] border border-purple-800 rounded-lg px-3 py-2 text-xs text-white focus:outline-none focus:border-purple-500"
+                    />
+                    <div>
+                      <div className="mb-2 text-[11px] font-bold text-neutral-300">مصادر الوسائط لهذا النيتش:</div>
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                        {[
+                          ["archive_org", "Internet Archive — يحتاج مراجعة الحقوق"],
+                          ["nara", "NARA — يحتاج مفتاحاً ومراجعة الحقوق"],
+                          ["loc", "مكتبة الكونغرس — يحتاج مراجعة الحقوق"],
+                          ["wikimedia", "Wikimedia Commons — ترخيص صريح فقط"],
+                          ["nasa", "NASA — فيديو أو صورة"],
+                          ["pixabay_video", "Pixabay — يحتاج مفتاحاً"],
+                          ["pexels_video", "Pexels — يحتاج مفتاحاً"],
+                          ["coverr_video", "Coverr — اختياري ومعطّل افتراضياً"],
+                        ].map(([sourceId, sourceLabel]) => (
+                          <label key={sourceId} className="flex items-start gap-2 rounded-lg border border-neutral-800 bg-black/20 p-2 text-[10px] text-neutral-300 cursor-pointer">
+                            <input
+                              type="checkbox"
+                              checked={customNicheSources.includes(sourceId)}
+                              onChange={(event) => setCustomNicheSources((previous) =>
+                                event.target.checked
+                                  ? [...previous, sourceId]
+                                  : previous.filter((source) => source !== sourceId)
+                              )}
+                              className="mt-0.5 accent-purple-500"
+                            />
+                            <span>{sourceLabel}</span>
+                          </label>
+                        ))}
+                      </div>
+                    </div>
+                  </div>
                 )}
               </div>
             </div>
@@ -1379,7 +1535,12 @@ export default function Home() {
               </button>
               <button
                 onClick={handleCreateProjectFinal}
-                disabled={creatingProject || (!selectedNiche && (!isCustomNicheActive || !customNicheText.trim()))}
+                disabled={creatingProject || (!selectedNiche && (
+                  !isCustomNicheActive ||
+                  !customNicheText.trim() ||
+                  customNicheDescription.trim().length < 5 ||
+                  customNicheSources.length === 0
+                ))}
                 className="px-6 py-3 rounded-xl bg-gradient-to-r from-amber-500 to-rose-500 text-black font-bold text-xs hover:opacity-90 disabled:opacity-50 transition-all flex items-center gap-2 shadow-lg shadow-amber-500/20"
               >
                 {creatingProject ? (
@@ -1493,7 +1654,7 @@ export default function Home() {
                     <span className="text-xs text-neutral-400 block mb-1">شكل الترجمة والكابشن:</span>
                     <div className="flex items-center gap-2 text-sm font-bold text-amber-400">
                       <Subtitles className="w-4 h-4" />
-                      <span>{captionConfig.font} • {captionConfig.position}</span>
+                      <span>{captionConfig.enabled ? "الكابشن مفعّل" : "الكابشن متوقف"} • {captionConfig.font} • {captionConfig.position}</span>
                     </div>
                   </div>
                   <span className="text-[11px] font-extrabold bg-amber-500/20 text-amber-400 px-2.5 py-1 rounded-lg group-hover:bg-amber-500 group-hover:text-black transition-all flex items-center gap-1">
@@ -1712,7 +1873,7 @@ export default function Home() {
 
                 return (
                   <div
-                    key={v.id}
+                    key={`${selectedProvider}:${String(v.id)}`}
                     onClick={() => setSelectedVoice(v.id)}
                     className={`cursor-pointer p-4 rounded-2xl border transition-all flex flex-col justify-between relative overflow-hidden group ${
                       isSelected
@@ -1853,6 +2014,22 @@ export default function Home() {
                 <p className="text-xs text-neutral-400 mt-1">
                   قم بمراجعة نصوص التعليق الصوتي لكل مشهد أو تعديلها. سيتم فقط إعادة توليد الصوت (TTS) للمشاهد التي تقوم بتعديلها لتوفير حصة الاستخدام.
                 </p>
+                {hasUnclearedLicense && (
+                  <div className="mt-4 rounded-xl border border-amber-500/40 bg-amber-500/10 p-3 text-right">
+                    <p className="text-xs font-bold text-amber-200">
+                      بعض اللقطات لا تملك ترخيصاً مؤكداً آلياً. راجع اسم الترخيص وصفحة المصدر قبل التصدير.
+                    </p>
+                    <label className="mt-3 flex items-start gap-2 text-xs text-neutral-200 cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={licenseReviewConfirmed}
+                        onChange={(event) => setLicenseReviewConfirmed(event.target.checked)}
+                        className="mt-0.5 accent-amber-500"
+                      />
+                      <span>راجعت مصادر اللقطات وأؤكد المتابعة بعد التحقق من صلاحية استخدامها.</span>
+                    </label>
+                  </div>
+                )}
               </div>
 
               {/* Scenes List */}
@@ -1913,6 +2090,34 @@ export default function Home() {
                                   controls
                                   className="w-full aspect-video object-cover"
                                 />
+                                {shot.metadata && (
+                                  <div className={`p-2.5 text-[10px] leading-relaxed ${
+                                    shot.metadata.rightsStatus === "valid"
+                                      ? "bg-emerald-950/30 text-emerald-100"
+                                      : "bg-amber-950/40 text-amber-100"
+                                  }`}>
+                                    <div className="font-bold">
+                                      {shot.metadata.provider || "مصدر غير معروف"}
+                                      {shot.metadata.licenseName ? ` • ${shot.metadata.licenseName}` : " • الترخيص يحتاج مراجعة"}
+                                    </div>
+                                    {shot.metadata.attributionText && <p className="mt-1">{shot.metadata.attributionText}</p>}
+                                    <div className="mt-1 flex flex-wrap gap-x-3 gap-y-1">
+                                      {shot.metadata.sourcePageUrl && (
+                                        <a href={shot.metadata.sourcePageUrl} target="_blank" rel="noreferrer" className="underline underline-offset-2">
+                                          صفحة المصدر
+                                        </a>
+                                      )}
+                                      {shot.metadata.licenseUrl && (
+                                        <a href={shot.metadata.licenseUrl} target="_blank" rel="noreferrer" className="underline underline-offset-2">
+                                          تفاصيل الترخيص
+                                        </a>
+                                      )}
+                                    </div>
+                                    {shot.metadata.isIllustrativeFootage && (
+                                      <p className="mt-1 text-amber-200">لقطة توضيحية وليست توثيقاً مباشراً للحادثة.</p>
+                                    )}
+                                  </div>
+                                )}
                               </div>
                             ))}
                           </div>
@@ -1943,7 +2148,7 @@ export default function Home() {
                 <button
                   type="button"
                   onClick={handleResumeSubmit}
-                  disabled={resumingJob}
+                  disabled={resumingJob || (hasUnclearedLicense && !licenseReviewConfirmed)}
                   className="px-8 py-3.5 rounded-xl bg-gradient-to-r from-amber-500 to-amber-600 text-black font-extrabold text-sm hover:opacity-90 disabled:opacity-50 transition-all shadow-lg shadow-amber-500/20 flex items-center gap-2"
                 >
                   {resumingJob ? (
@@ -2031,6 +2236,7 @@ export default function Home() {
                     <div className="absolute inset-0 bg-[linear-gradient(to_right,#1f1f1f15_1px,transparent_1px),linear-gradient(to_bottom,#1f1f1f15_1px,transparent_1px)] bg-[size:2rem_2rem] opacity-40 pointer-events-none" />
 
                     {/* Subtitle Display */}
+                    {tempCaptionConfig.enabled ? (
                     <div
                       style={{
                         fontFamily:
@@ -2093,6 +2299,11 @@ export default function Home() {
                         <span style={{ color: tempCaptionConfig.color }}>هذا مثال لشكل الترجمة على الفيديو</span>
                       )}
                     </div>
+                    ) : (
+                      <div className="z-10 rounded-lg border border-neutral-700 bg-black/60 px-4 py-2 text-xs font-bold text-neutral-300">
+                        الكابشن متوقف
+                      </div>
+                    )}
 
                     <div className="absolute top-3 right-3 text-[10px] text-neutral-500 font-bold bg-black/60 px-2 py-0.5 rounded border border-white/5 pointer-events-none">
                       معاينة حية 1080p
@@ -2102,6 +2313,18 @@ export default function Home() {
 
                 {/* ── RIGHT: CONTROLS ──────────────────────────────────────── */}
                 <div className="space-y-5 text-right">
+                  <label className="flex items-center justify-between rounded-xl border border-neutral-800 bg-[#1a1a1a] p-3 cursor-pointer">
+                    <span>
+                      <span className="block text-sm font-bold text-white">إظهار الكابشن</span>
+                      <span className="mt-1 block text-[11px] text-neutral-400">عند الإيقاف لن يتم تفريغ الصوت أو حرق الترجمة داخل الفيديو.</span>
+                    </span>
+                    <input
+                      type="checkbox"
+                      checked={tempCaptionConfig.enabled}
+                      onChange={(event) => setTempCaptionConfig({ ...tempCaptionConfig, enabled: event.target.checked })}
+                      className="h-4 w-4 accent-amber-500"
+                    />
+                  </label>
                   {/* 1. Primary & Highlight Free Color Pickers */}
                   <div className="grid grid-cols-2 gap-3">
                     <div>

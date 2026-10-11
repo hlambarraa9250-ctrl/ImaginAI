@@ -1,6 +1,7 @@
 import json
 import uuid
 import shutil
+import httpx
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
@@ -9,7 +10,16 @@ from fastapi import FastAPI, BackgroundTasks, HTTPException, Query, Request, Res
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 
-from app.config import JOBS_DIR, STORAGE_DIR, VOICE_PROVIDERS
+from app.config import (
+    COVERR_ENABLED,
+    JOBS_DIR,
+    STORAGE_DIR,
+    VOICE_PROVIDERS,
+    get_coverr_key,
+    get_nara_key,
+    get_pexels_key,
+    get_pixabay_key,
+)
 from app.models import (
     JobRequest,
     JobStatusResponse,
@@ -21,6 +31,7 @@ from app.models import (
     make_initial_status,
     ApiKeySaveRequest,
     ApiKeyTestRequest,
+    VideoSourceSearchRequest,
 )
 from app.api_keys import (
     delete_user_key,
@@ -288,7 +299,14 @@ async def list_voices(device_id: str = Depends(get_current_device)):
         })
 
     if fish_voices or custom_voices_list:
-        combined_fish = custom_voices_list + (fish_voices or [])
+        combined_fish = []
+        seen_voice_ids: set[str] = set()
+        for voice_item in custom_voices_list + (fish_voices or []):
+            voice_id = str(voice_item.get("id", "")).strip()
+            if not voice_id or voice_id in seen_voice_ids:
+                continue
+            seen_voice_ids.add(voice_id)
+            combined_fish.append(voice_item)
         for p in providers:
             if p.get("provider") == "fish-audio":
                 p["voices"] = combined_fish
@@ -481,6 +499,16 @@ async def create_job(
     from app.niches import find_niche_info
     if req.niche_id and not find_niche_info(req.niche_id) and not req.custom_niche:
         raise HTTPException(status_code=400, detail="معرّف النيتش غير صالح.")
+    allowed_source_ids = {
+        "pexels_video", "pixabay_video", "pexels_image", "pixabay_image",
+        "coverr_video", "nara", "nasa", "wikimedia", "archive_org", "loc",
+    }
+    if req.niche_sources is not None:
+        unknown_sources = set(req.niche_sources) - allowed_source_ids
+        if unknown_sources:
+            raise HTTPException(status_code=400, detail="تتضمن قائمة المصادر اختياراً غير معروف.")
+        if not req.niche_sources:
+            raise HTTPException(status_code=400, detail="اختر مصدراً واحداً على الأقل للوسائط.")
 
     if x_idempotency_key:
         for existing_dir in JOBS_DIR.iterdir() if JOBS_DIR.exists() else []:
@@ -553,6 +581,8 @@ async def create_job(
                 "provided_script": req.provided_script,
                 "niche_id": req.niche_id,
                 "custom_niche": req.custom_niche,
+                "custom_niche_description": req.custom_niche_description,
+                "niche_sources": req.niche_sources,
                 "additional_context": req.additional_context,
                 "strict_focus": req.strict_focus,
                 "caption_config": req.caption_config,
@@ -578,6 +608,8 @@ async def create_job(
         project_id=project_id,
         niche_id=req.niche_id,
         custom_niche=req.custom_niche,
+        custom_niche_description=req.custom_niche_description,
+        niche_sources=req.niche_sources,
         caption_config=req.caption_config,
         input_mode=req.input_mode,
         provided_script=req.provided_script,
@@ -626,6 +658,130 @@ async def test_api_key_settings(req: ApiKeyTestRequest, device_id: str = Depends
         error=result.get("message"),
     )
     return {"success": result["status"] == "valid", **result}
+
+
+VIDEO_SOURCE_CATALOG = [
+    {"id": "pexels_video", "label": "Pexels", "key_provider": "pexels", "requires_key": True},
+    {"id": "pixabay_video", "label": "Pixabay", "key_provider": "pixabay", "requires_key": True},
+    {"id": "coverr_video", "label": "Coverr", "key_provider": "coverr", "requires_key": True},
+    {"id": "nara", "label": "NARA", "key_provider": "nara", "requires_key": True},
+    {"id": "nasa", "label": "NASA Images and Video Library", "requires_key": False},
+    {"id": "wikimedia", "label": "Wikimedia Commons", "requires_key": False},
+    {"id": "archive_org", "label": "Internet Archive", "requires_key": False},
+    {"id": "loc", "label": "Library of Congress", "requires_key": False},
+]
+
+
+def _source_key(provider: str, device_id: str) -> str:
+    getters = {
+        "pexels": get_pexels_key,
+        "pixabay": get_pixabay_key,
+        "coverr": get_coverr_key,
+        "nara": get_nara_key,
+    }
+    return getters[provider](device_id=device_id)
+
+
+@app.get("/api/video-sources")
+async def get_video_source_catalog(device_id: str = Depends(get_current_device)):
+    """Describe video sources without exposing any configured credential values."""
+    sources = []
+    for source in VIDEO_SOURCE_CATALOG:
+        item = {**source}
+        item["enabled"] = not (source["id"] == "coverr_video" and not COVERR_ENABLED)
+        if source["id"] == "coverr_video" and not item["enabled"]:
+            item["connectionStatus"] = "disabled"
+        elif source["requires_key"]:
+            try:
+                _source_key(source["key_provider"], device_id)
+                item["connectionStatus"] = "configured_not_tested"
+            except RuntimeError:
+                item["connectionStatus"] = "missing_key"
+        else:
+            item["connectionStatus"] = "not_tested"
+        sources.append(item)
+    return {"sources": sources}
+
+
+@app.post("/api/video-sources/{source_id}/test")
+async def test_video_source(source_id: str, device_id: str = Depends(get_current_device)):
+    """Make a low-cost live request and report success only for a real valid response."""
+    source = next((item for item in VIDEO_SOURCE_CATALOG if item["id"] == source_id), None)
+    if not source:
+        raise HTTPException(status_code=404, detail="مصدر الفيديو غير معروف.")
+    if source_id == "coverr_video" and not COVERR_ENABLED:
+        return {"status": "disabled", "message": "Coverr معطّل افتراضياً. فعّل COVERR_ENABLED أولاً."}
+
+    if source["requires_key"]:
+        from app.services.provider_tests import test_provider
+        try:
+            key = _source_key(source["key_provider"], device_id)
+        except RuntimeError:
+            return {"status": "not_configured", "message": "أضف مفتاح الخدمة واختبره أولاً."}
+        result = await test_provider(source["key_provider"], key)
+        return {"success": result["status"] == "valid", **result}
+
+    checks = {
+        "nasa": (
+            "https://images-api.nasa.gov/search",
+            {"q": "moon", "media_type": "video", "page_size": "1"},
+            lambda payload: "collection" in payload,
+        ),
+        "wikimedia": (
+            "https://commons.wikimedia.org/w/api.php",
+            {"action": "query", "format": "json", "meta": "siteinfo"},
+            lambda payload: "query" in payload,
+        ),
+        "archive_org": (
+            "https://archive.org/advancedsearch.php",
+            {"q": "mediatype:movies", "rows": "1", "output": "json"},
+            lambda payload: "response" in payload,
+        ),
+        "loc": (
+            "https://www.loc.gov/pictures/search/",
+            {"q": "space", "fo": "json", "c": "1"},
+            lambda payload: "results" in payload,
+        ),
+    }
+    url, params, accepts_response = checks[source_id]
+    try:
+        async with httpx.AsyncClient(timeout=12) as client:
+            response = await client.get(url, params=params)
+            response.raise_for_status()
+            if not accepts_response(response.json()):
+                return {"status": "invalid", "message": "وصل رد غير متوقع من الخدمة."}
+        return {"status": "valid", "success": True, "message": "نجح الاتصال بالمصدر."}
+    except Exception as exc:
+        return {
+            "status": "unavailable",
+            "success": False,
+            "message": f"تعذر الاتصال بالمصدر ({type(exc).__name__}).",
+        }
+
+
+@app.post("/api/video-sources/search")
+async def search_video_source_assets(
+    req: VideoSourceSearchRequest,
+    device_id: str = Depends(get_current_device),
+):
+    source_ids = req.source_ids or [
+        "archive_org", "loc", "wikimedia", "nasa", "nara",
+        "pixabay_video", "pexels_video", "pixabay_image", "pexels_image",
+    ]
+    allowed_source_ids = {
+        "pexels_video", "pixabay_video", "pexels_image", "pixabay_image",
+        "coverr_video", "nara", "nasa", "wikimedia", "archive_org", "loc",
+    }
+    if set(source_ids) - allowed_source_ids:
+        raise HTTPException(status_code=400, detail="تتضمن قائمة المصادر اختياراً غير معروف.")
+    from app.services.footage import search_video_sources
+    assets = await search_video_sources(
+        keywords=[item.strip() for item in req.keywords if item.strip()],
+        source_ids=source_ids,
+        device_id=device_id,
+        limit=req.limit,
+    )
+    return {"assets": assets}
 
 
 @app.post("/api/feedback")
@@ -748,6 +904,22 @@ async def resume_job_endpoint(
     st = json.loads(status_file.read_text(encoding="utf-8"))
     if st.get("status") != "pending_review":
         raise HTTPException(status_code=400, detail="الـ Job ليس في حالة انتظار المراجعة (pending_review).")
+
+    review_file = _job_dir(job_id) / "review_data.json"
+    try:
+        review_data = json.loads(review_file.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        raise HTTPException(status_code=500, detail="تعذر التحقق من بيانات ترخيص اللقطات.")
+    needs_license_review = any(
+        (shot.get("metadata") or {}).get("rightsStatus") != "valid"
+        for scene in review_data.get("scenes", [])
+        for shot in scene.get("shots", [])
+    )
+    if needs_license_review and not req.license_review_confirmed:
+        raise HTTPException(
+            status_code=400,
+            detail="توجد لقطات تحتاج إلى مراجعة الترخيص. راجع مصدر كل لقطة وأكد المتابعة قبل التصدير.",
+        )
 
     st["status"] = "processing"
     st["current_stage"] = "captions"

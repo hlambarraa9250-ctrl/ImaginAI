@@ -17,7 +17,7 @@ from cryptography.fernet import Fernet
 
 from app.db import get_db_connection
 
-PROVIDERS = ("gemini", "fish-audio", "pexels", "pixabay", "nasa", "groq")
+PROVIDERS = ("gemini", "fish-audio", "pexels", "pixabay", "nasa", "groq", "coverr", "nara")
 MAX_GEMINI_KEYS = 5
 
 

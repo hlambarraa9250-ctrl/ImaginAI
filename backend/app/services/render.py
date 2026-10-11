@@ -220,41 +220,59 @@ def _prepare_shot(
     shot_idx: int,
 ) -> str:
     """
-    Apply subtle Ken Burns effect (zoompan max 1.08, smooth linear) and scale/trim shot to exact target_duration at 1920x1080 25fps.
-    Supports both video clips and static image fallbacks.
+    Preserve motion in video clips; apply a gentle Ken Burns effect only to still images.
+    Both paths produce 1920x1080 at 25fps for exactly target_duration.
     """
     fps = 25
     total_frames = max(1, int(target_duration * fps))
 
-    # Detect if shot is an image file
     ext = Path(shot_path).suffix.lower()
     is_image = ext in [".jpg", ".jpeg", ".png", ".webp", ".bmp"]
 
-    # Subtle Ken Burns patterns (max 8% zoom or gentle pan, smooth & linear over total_frames)
-    pattern = shot_idx % 4
-    if pattern == 0:
-        # Smooth Zoom In (1.0 -> 1.08)
-        zp = f"z='1.0+0.08*(on/{total_frames})':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)'"
-    elif pattern == 1:
-        # Smooth Zoom Out (1.08 -> 1.0)
-        zp = f"z='1.08-0.08*(on/{total_frames})':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)'"
-    elif pattern == 2:
-        # Smooth Pan Right (fixed 1.05 zoom)
-        zp = f"z='1.05':x='(iw-iw/zoom)*(on/{total_frames})':y='ih/2-(ih/zoom/2)'"
+    if is_image:
+        pattern = shot_idx % 4
+        if pattern == 0:
+            zp = f"z='1.0+0.08*(on/{total_frames})':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)'"
+        elif pattern == 1:
+            zp = f"z='1.08-0.08*(on/{total_frames})':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)'"
+        elif pattern == 2:
+            zp = f"z='1.05':x='(iw-iw/zoom)*(on/{total_frames})':y='ih/2-(ih/zoom/2)'"
+        else:
+            zp = f"z='1.05':x='(iw-iw/zoom)*(1-(on/{total_frames}))':y='ih/2-(ih/zoom/2)'"
+        filter_graph = (
+            f"scale=1920:1080:force_original_aspect_ratio=increase,"
+            f"crop=1920:1080,setsar=1,"
+            f"zoompan={zp}:d={total_frames}:s=1920x1080:fps={fps},"
+            f"trim=duration={target_duration},setpts=PTS-STARTPTS"
+        )
+        input_args = ["-loop", "1", "-i", shot_path]
     else:
-        # Smooth Pan Left (fixed 1.05 zoom)
-        zp = f"z='1.05':x='(iw-iw/zoom)*(1-(on/{total_frames}))':y='ih/2-(ih/zoom/2)'"
+        # A video must never pass through zoompan: zoompan duplicates its input
+        # frames and made motion clips look like still images.
+        source_duration = 0.0
+        try:
+            probe = subprocess.run(
+                [
+                    "ffprobe", "-v", "error", "-show_entries", "format=duration",
+                    "-of", "default=noprint_wrappers=1:nokey=1", shot_path,
+                ],
+                capture_output=True,
+                text=True,
+                timeout=15,
+            )
+            if probe.returncode == 0:
+                source_duration = float(probe.stdout.strip())
+        except (OSError, ValueError, subprocess.TimeoutExpired):
+            pass
 
-    filter_graph = (
-        f"scale=1920:1080:force_original_aspect_ratio=increase,"
-        f"crop=1920:1080,"
-        f"setsar=1,"
-        f"zoompan={zp}:d={total_frames}:s=1920x1080:fps={fps},"
-        f"trim=duration={target_duration},"
-        f"setpts=PTS-STARTPTS"
-    )
-
-    input_args = ["-loop", "1", "-i", shot_path] if is_image else ["-i", shot_path]
+        max_start = max(0.0, source_duration - target_duration)
+        start_offset = (shot_idx * target_duration) % max_start if max_start > 0 else 0.0
+        filter_graph = (
+            f"scale=1920:1080:force_original_aspect_ratio=increase,"
+            f"crop=1920:1080,setsar=1,fps={fps},"
+            f"trim=duration={target_duration},setpts=PTS-STARTPTS"
+        )
+        input_args = ["-stream_loop", "-1", "-ss", f"{start_offset:.3f}", "-i", shot_path]
 
     _run_ffmpeg(
         input_args + [
@@ -294,6 +312,7 @@ async def _render_scene(
     """
     num_shots = len(shot_paths)
     shot_dur = audio_duration / num_shots
+    captions_enabled = (caption_config or {}).get("enabled", True) is not False
 
     # 1. Prepare each shot
     prepared_shots = []
@@ -329,10 +348,11 @@ async def _render_scene(
             f"Scene {scene_idx} shots concat",
         )
 
-    # 3. Generate ASS subtitle file
-    ass_path = str(temp_dir / f"scene_{scene_idx}.ass")
-    _generate_ass_subtitles(caption_lines, ass_path, caption_config)
-    ass_escaped = ass_path.replace("\\", "/").replace(":", "\\:")
+    # 3. Generate ASS subtitle file only when the user requested captions.
+    if captions_enabled:
+        ass_path = str(temp_dir / f"scene_{scene_idx}.ass")
+        _generate_ass_subtitles(caption_lines, ass_path, caption_config)
+        ass_escaped = ass_path.replace("\\", "/").replace(":", "\\:")
 
     # 4. Build video filter graph (subtitles + Section Overlay / Listicle badge)
     video_filters = []
@@ -379,28 +399,29 @@ async def _render_scene(
         video_filters.append(badge_vf)
 
     # Subtitles filter
-    fonts_dirs = []
-    default_fonts_dir = Path(__file__).resolve().parent.parent.parent / "assets" / "fonts"
-    if default_fonts_dir.exists():
-        fonts_dirs.append(str(default_fonts_dir).replace("\\", "/").replace(":", "\\:"))
+    if captions_enabled:
+        fonts_dirs = []
+        default_fonts_dir = Path(__file__).resolve().parent.parent.parent / "assets" / "fonts"
+        if default_fonts_dir.exists():
+            fonts_dirs.append(str(default_fonts_dir).replace("\\", "/").replace(":", "\\:"))
 
-    font_raw = (caption_config or {}).get("font", "")
-    if font_raw.startswith("custom:"):
-        font_id = font_raw.split(":", 1)[1]
-        from app.db import get_custom_font_by_id
-        font_row = get_custom_font_by_id(font_id)
-        if font_row and Path(font_row["file_path"]).exists():
-            custom_dir = str(Path(font_row["file_path"]).parent).replace("\\", "/").replace(":", "\\:")
-            if custom_dir not in fonts_dirs:
-                fonts_dirs.append(custom_dir)
+        font_raw = (caption_config or {}).get("font", "")
+        if font_raw.startswith("custom:"):
+            font_id = font_raw.split(":", 1)[1]
+            from app.db import get_custom_font_by_id
+            font_row = get_custom_font_by_id(font_id)
+            if font_row and Path(font_row["file_path"]).exists():
+                custom_dir = str(Path(font_row["file_path"]).parent).replace("\\", "/").replace(":", "\\:")
+                if custom_dir not in fonts_dirs:
+                    fonts_dirs.append(custom_dir)
 
-    if fonts_dirs:
-        fonts_dir_param = ":".join(fonts_dirs)
-        video_filters.append(f"ass='{ass_escaped}':fontsdir='{fonts_dir_param}'")
-    else:
-        video_filters.append(f"ass='{ass_escaped}'")
+        if fonts_dirs:
+            fonts_dir_param = ":".join(fonts_dirs)
+            video_filters.append(f"ass='{ass_escaped}':fontsdir='{fonts_dir_param}'")
+        else:
+            video_filters.append(f"ass='{ass_escaped}'")
 
-    vf_chain = ",".join(video_filters)
+    vf_args = ["-vf", ",".join(video_filters)] if video_filters else []
 
     # 5. Final FFmpeg render for scene: video + narration audio
     await asyncio.to_thread(
@@ -408,7 +429,7 @@ async def _render_scene(
         [
             "-i", combined_video,
             "-i", audio_path,
-            "-vf", vf_chain,
+            *vf_args,
             "-map", "0:v",
             "-map", "1:a",
             "-c:v", "libx264",
@@ -444,12 +465,13 @@ async def render_video(
     temp_dir = job_dir / "temp"
     temp_dir.mkdir(exist_ok=True)
 
+    captions_enabled = (caption_config or {}).get("enabled", True) is not False
     if not (len(scenes) == len(audio_paths) == len(audio_durations) == len(shots_per_scene) == len(caption_data)):
-        raise RuntimeError("Render prerequisites are incomplete: every scene needs audio, footage, and captions.")
+        raise RuntimeError("Render prerequisites are incomplete: every scene needs audio and footage.")
     for idx, scene in enumerate(scenes):
         if not scene.narration.strip() or audio_durations[idx] <= 0:
             raise RuntimeError(f"Render prerequisites are invalid for scene {idx + 1}.")
-        if not caption_data[idx]:
+        if captions_enabled and not caption_data[idx]:
             raise RuntimeError(f"Render prerequisites are missing captions for scene {idx + 1}.")
         if not shots_per_scene[idx]:
             raise RuntimeError(f"Render prerequisites are missing footage for scene {idx + 1}.")

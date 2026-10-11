@@ -103,6 +103,14 @@ def get_fish_audio_key(device_id: str | None = None) -> str:
 def get_nasa_key(device_id: str | None = None) -> str:
     return _get_provider_key("nasa", "NASA_API_KEY", device_id)
 
+def get_coverr_key(device_id: str | None = None) -> str:
+    return _get_provider_key("coverr", "COVERR_API_KEY", device_id)
+
+def get_nara_key(device_id: str | None = None) -> str:
+    return _get_provider_key("nara", "NARA_API_KEY", device_id)
+
+COVERR_ENABLED = os.getenv("COVERR_ENABLED", "false").strip().lower() in {"1", "true", "yes", "on"}
+
 # ── Model Constants ──────────────────────────────────────────────────────────
 
 GEMINI_TEXT_MODEL = os.getenv("GEMINI_TEXT_MODEL", "gemini-3.6-flash").strip() or "gemini-3.6-flash"

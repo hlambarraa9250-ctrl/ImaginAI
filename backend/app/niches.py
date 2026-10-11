@@ -559,16 +559,33 @@ def find_niche_info(niche_id: str) -> Dict[str, Any] | None:
     reject invalid catalog IDs instead of silently changing their behavior.
     """
     niche_data = None
+    domain_title = ""
     for domain in DOMAINS_DATA:
         for sub in domain["sub_niches"]:
             if sub["id"] == niche_id or sub["title"] == niche_id:
                 niche_data = dict(sub)
+                domain_title = domain.get("title", "")
                 break
         if niche_data:
             break
 
     if not niche_data:
         return None
+
+    text = f"{niche_id} {niche_data.get('title', '')} {domain_title}".lower()
+    configured_sources = [
+        item.strip()
+        for item in str(niche_data.get("sources", "")).split(",")
+        if item.strip()
+    ]
+    if any(word in text for word in ("history", "historical", "military", "biograph", "تاريخ", "حروب", "شخصيات")):
+        preferred_sources = ["archive_org", "loc", "wikimedia", "nara"]
+    elif any(word in text for word in ("space", "science", "astronomy", "nasa", "فضاء", "علوم", "فلك")):
+        preferred_sources = ["nasa", "wikimedia", "archive_org"]
+    else:
+        preferred_sources = ["wikimedia", "archive_org", "loc"]
+    niche_data["sources"] = ", ".join(dict.fromkeys(preferred_sources + configured_sources + ["coverr_video"]))
+    niche_data["domain_title"] = domain_title
 
     # Automatically set section_overlay_type if not explicitly set
     if "section_overlay_type" not in niche_data or not niche_data["section_overlay_type"]:

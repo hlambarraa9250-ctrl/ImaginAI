@@ -3,6 +3,7 @@
  */
 
 export interface CaptionConfig {
+  enabled?: boolean;
   color?: string;
   effect?: string;
   font?: string;
@@ -18,6 +19,8 @@ export interface JobRequest {
   voice?: string;
   niche_id?: string;
   custom_niche?: string;
+  custom_niche_description?: string;
+  niche_sources?: string[];
   music_track?: string;
   input_mode?: "ai_generated" | "script_provided" | "idea" | "script";
   provided_script?: string;
@@ -344,6 +347,19 @@ export interface ReviewShot {
   shot_index: number;
   clip_path?: string;
   stream_url: string;
+  metadata?: {
+    provider?: string;
+    providerAssetId?: string;
+    title?: string;
+    sourcePageUrl?: string;
+    licenseName?: string;
+    licenseUrl?: string;
+    rightsStatus?: "valid" | "needs_review" | string;
+    requiresAttribution?: boolean;
+    attributionText?: string;
+    isRealHistoricalFootage?: boolean;
+    isIllustrativeFootage?: boolean;
+  };
 }
 
 export interface ReviewScene {
@@ -385,7 +401,8 @@ export async function getJobReviewData(jobId: string): Promise<ReviewData> {
 
 export async function resumeJob(
   jobId: string,
-  editedScenes: { scene_index: number; narration?: string; shots?: string[] }[]
+  editedScenes: { scene_index: number; narration?: string; shots?: string[] }[],
+  licenseReviewConfirmed = false
 ): Promise<{ success: boolean; message: string }> {
   const visitorId = getOrCreateVisitorId();
   const resp = await fetch(`${API_BASE}/api/jobs/${jobId}/resume`, {
@@ -396,7 +413,10 @@ export async function resumeJob(
       "x-visitor-id": visitorId,
       "x-device-id": visitorId,
     },
-    body: JSON.stringify({ edited_scenes: editedScenes }),
+    body: JSON.stringify({
+      edited_scenes: editedScenes,
+      license_review_confirmed: licenseReviewConfirmed,
+    }),
   });
 
   if (!resp.ok) {
@@ -499,6 +519,37 @@ export async function testApiKey(provider: string, keyId: string): Promise<{ sta
   });
   const data = await resp.json();
   if (!resp.ok) throw new Error(data.detail || "فشل اختبار المفتاح");
+  return data;
+}
+
+export interface VideoSourceInfo {
+  id: string;
+  label: string;
+  requires_key: boolean;
+  enabled: boolean;
+  connectionStatus: "disabled" | "missing_key" | "configured_not_tested" | "not_tested";
+}
+
+export async function getVideoSources(): Promise<{ sources: VideoSourceInfo[] }> {
+  const resp = await fetch(`${API_BASE}/api/video-sources`, {
+    cache: "no-store",
+    credentials: "include",
+    headers: deviceHeaders(),
+  });
+  if (!resp.ok) throw new Error("تعذر تحميل مصادر الفيديو");
+  return resp.json();
+}
+
+export async function testVideoSource(
+  sourceId: string,
+): Promise<{ status: string; success?: boolean; message: string }> {
+  const resp = await fetch(`${API_BASE}/api/video-sources/${encodeURIComponent(sourceId)}/test`, {
+    method: "POST",
+    credentials: "include",
+    headers: deviceHeaders(),
+  });
+  const data = await resp.json();
+  if (!resp.ok) throw new Error(data.detail || "فشل اختبار مصدر الفيديو");
   return data;
 }
 

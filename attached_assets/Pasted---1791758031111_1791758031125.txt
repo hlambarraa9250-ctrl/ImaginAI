@@ -1,0 +1,846 @@
+هناك  تعديل اريد ان تقوم به في قسم مصادر لقطات والذي سوف يكون تحديد كامل في كل نيتش يوجد في موقع يجب ان تقول ناهي مصادر التي سوف تكون مستخدمة في فيديوهات خاصة بهذا نيتش واذا اراد مستخدم انشاء نيتش خاص به يدخل وصف ويختار مصادر الذي يريدها ان تكون في فيديوهاته. هذا مقال انشأته من manus خذ منه جميع مصادر وضفها حسب شرح الذي اخبرك وايضا مصادر التي تحتاج الى api keys ضفها في secrets replit كي اضيف مفتاح واضف في إعدادات في موقع تخبرك بخدمات التي تشتغل حاليا كتابة سكريبت توليد صوت ومشاهد وترجمة كل خدمات يخبرك من هي التي تشتغل بنجاح. ورتب هذه مصادر حسب نيتشات مناسبة لها . هذا هو مقال:
+# نص جاهز لإعطائه إلى Replit
+
+أريد تحديث موقعي الحالي، وهو موقع يحوّل فكرة المستخدم إلى فيديوهات طويلة مثل الوثائقيات والشروحات. الموقع ينشئ السيناريو، يقسمه إلى فقرات، يبحث عن لقطات مناسبة، يضيف التعليق الصوتي والكابشن والموسيقى والمؤثرات، ثم يسمح بتعديل الفيديو من خلال Timeline.
+
+المشكلة الحالية أن مصادر الفيديو الموجودة في الموقع غير مستقرة أو غير مربوطة بطريقة صحيحة. أريد تنفيذ تكامل حقيقي مع مصادر الفيديو التالية، مع عدم وضع أي مفتاح API داخل كود الواجهة الأمامية أو GitHub.
+
+## الهدف الأساسي
+
+أضف طبقة موحدة باسم `VideoSourceProvider` تسمح للموقع بالبحث في عدة مصادر، وتعيد نفس الشكل الموحد للنتائج مهما اختلف المصدر.
+
+يجب أن تكون كل الاتصالات الخارجية من خلال Backend API، وليس مباشرة من React أو المتصفح.
+
+استخدم متغيرات البيئة في Replit Secrets، وضع لكل مصدر واجهة إعداد واضحة داخل لوحة الإدارة باسم **Video API Sources** أو **مصادر الفيديو**.
+
+يجب أن يستطيع المستخدم أو مدير الموقع:
+
+1. تفعيل أو تعطيل كل مصدر.
+
+1. إدخال API Key عندما يكون المصدر بحاجة إلى مفتاح.
+
+1. اختبار الاتصال بزر `Test Connection`.
+
+1. رؤية رسالة الخطأ الحقيقية إذا فشل الاتصال.
+
+1. رؤية حالة المصدر: `Connected`, `Not configured`, `Rate limited`, `Error`, `Disabled`.
+
+1. اختيار أولوية المصادر.
+
+1. تحديد ما إذا كان يريد `Commercial B-roll` أو `Historical/Archive` أو `Scientific/NASA` أو `Illustrative footage`.
+
+---
+
+# 1. الشكل الموحد لنتيجة أي مصدر
+
+أنشئ Type/Schema موحداً بهذا الشكل:
+
+```json
+{
+  "provider": "pexels",
+  "providerAssetId": "123456",
+  "title": "Descriptive title",
+  "description": "Original description",
+  "thumbnailUrl": "https://...",
+  "previewUrl": "https://...",
+  "downloadUrl": "https://...",
+  "sourcePageUrl": "https://...",
+  "width": 1920,
+  "height": 1080,
+  "durationSeconds": 18,
+  "fps": 30,
+  "orientation": "landscape",
+  "creator": "Creator name",
+  "licenseName": "License name or rights text",
+  "licenseUrl": "https://...",
+  "rightsStatus": "approved|needs_review|unknown|rejected",
+  "requiresAttribution": true,
+  "attributionText": "Video by ... from ...",
+  "isRealHistoricalFootage": false,
+  "isIllustrativeFootage": true,
+  "downloadAllowed": true,
+  "providerMetadata": {}
+}
+```
+
+لا تسمح بظهور نتيجة للمستخدم إذا لم تحتوي على:
+
+- `provider`.
+
+- `providerAssetId`.
+
+- `sourcePageUrl`.
+
+- `licenseName` أو `rightsStatus = needs_review`.
+
+- رابط preview أو thumbnail صالح.
+
+لا تجعل النظام يصف لقطة stock بأنها «لقطة حقيقية من الحدث». إذا كانت اللقطة توضيحية، خزّن واعرض `isIllustrativeFootage: true` وعبارة **Illustrative footage / لقطات توضيحية**.
+
+---
+
+# 2. المصادر التي تحتاج API Key
+
+أنشئ هذه المتغيرات في Replit Secrets:
+
+```
+PEXELS_API_KEY=
+PIXABAY_API_KEY=
+COVERR_API_KEY=
+NASA_API_KEY=
+NARA_API_KEY=
+```
+
+لا تستخدم جميع المتغيرات إذا كان المصدر لا يحتاجها، ولا تضع أي قيمة حقيقية داخل الملفات أو الأمثلة أو الواجهة.
+
+## المصدر الأول: Pexels Videos API
+
+### هل يحتاج API Key؟
+
+نعم. يجب إنشاء مفتاح من حساب Pexels ووضعه في:
+
+```
+PEXELS_API_KEY=your_key_here
+```
+
+### التوثيق الرسمي
+
+```
+https://www.pexels.com/api/documentation/
+```
+
+### Endpoint البحث
+
+```
+GET https://api.pexels.com/v1/videos/search
+```
+
+Headers:
+
+```
+Authorization: PEXELS_API_KEY
+```
+
+Parameters المقترحة:
+
+```
+query
+page
+per_page
+orientation=landscape|portrait|square
+size=large|medium|small
+locale
+```
+
+مثال Backend:
+
+```javascript
+const response = await fetch(
+  `https://api.pexels.com/v1/videos/search?query=${encodeURIComponent(query )}&per_page=20&orientation=landscape`,
+  {
+    headers: {
+      Authorization: process.env.PEXELS_API_KEY
+    }
+  }
+);
+```
+
+### تحويل النتيجة
+
+استخدم من كل عنصر:
+
+- `id` إلى `providerAssetId`.
+
+- `url` إلى `sourcePageUrl`.
+
+- `image` إلى `thumbnailUrl`.
+
+- أول رابط MP4 مناسب من `video_files` إلى `downloadUrl`.
+
+- `duration` إلى `durationSeconds`.
+
+- `user.name` إلى `creator`.
+
+- أنشئ attribution مثل:
+
+```
+Video by {creator} on Pexels
+```
+
+### النيتشات المناسبة
+
+السفر، المدن، الأعمال، التقنية، الطبيعة، الطعام، الصحة، الإنتاجية، الأشخاص، وB-roll العام.
+
+### القيود الضرورية
+
+- يجب وضع رابط بارز إلى Pexels في واجهة النتائج أو صفحة المصادر.
+
+- لا تنفذ scraping من موقع Pexels.
+
+- لا تنفذ تنزيلات جماعية أو غير محدودة.
+
+- لا تستخدم Pexels كقاعدة ملفات مستقلة أو كخدمة منافسة لموقع Pexels دون إذن مكتوب.
+
+- لا تعرض ملفاً خاماً منفرداً على أنه أصل يملكه الموقع.
+
+- لا تستخدم لقطة لشخص أو علامة تجارية بطريقة توحي بالتأييد أو في اتهام جنائي.
+
+- خزّن metadata ورابط المصدر مع كل فيديو مستخدم.
+
+### اختبار الاتصال
+
+أنشئ endpoint داخلي:
+
+```
+GET /api/video-sources/pexels/test
+```
+
+ينفذ بحثاً بسيطاً عن `nature` ويعيد حالة الاتصال وعدد النتائج أو رسالة الخطأ.
+
+---
+
+## المصدر الثاني: Pixabay Videos API
+
+### هل يحتاج API Key؟
+
+نعم. ضع المفتاح في:
+
+```
+PIXABAY_API_KEY=your_key_here
+```
+
+### التوثيق الرسمي
+
+```
+https://pixabay.com/api/docs/
+```
+
+### Endpoint البحث
+
+```
+GET https://pixabay.com/api/videos/
+```
+
+Parameters:
+
+```
+key
+q
+lang
+video_type=all|film|animation
+category
+min_width
+min_height
+safesearch=true
+order=popular|latest
+page
+per_page
+```
+
+مثال:
+
+```javascript
+const url = new URL("https://pixabay.com/api/videos/" );
+url.searchParams.set("key", process.env.PIXABAY_API_KEY);
+url.searchParams.set("q", query);
+url.searchParams.set("safesearch", "true");
+url.searchParams.set("per_page", "20");
+
+const response = await fetch(url);
+```
+
+### تحويل النتيجة
+
+من `hits`:
+
+- `id` إلى `providerAssetId`.
+
+- `pageURL` إلى `sourcePageUrl`.
+
+- `tags` إلى `description` أو `providerMetadata.tags`.
+
+- `videos.large.url` أو `videos.medium.url` إلى `downloadUrl`.
+
+- `videos.large.thumbnail` إلى `thumbnailUrl`.
+
+- `duration` إلى `durationSeconds`.
+
+- `user` إلى `creator`.
+
+- `licenseName` = `Pixabay Content License`.
+
+- `requiresAttribution` = `false` بحسب ملخص الترخيص، مع إبقاء attribution اختيارياً.
+
+### النيتشات المناسبة
+
+الطبيعة، الحيوانات، السفر، المدن، الأعمال، التقنية، الرياضة، الطعام، الصحة، الخلفيات، والرسوم المتحركة.
+
+### القيود الضرورية
+
+- الحد الافتراضي المعلن هو 100 طلب كل 60 ثانية.
+
+- خزّن نتائج API مؤقتاً لمدة 24 ساعة على الأقل.
+
+- لا تنفذ آلاف الاستعلامات الآلية في وقت قصير.
+
+- لا تستخدم Pixabay لبناء نظام تنزيل جماعي.
+
+- حمّل الفيديو إلى تخزين التطبيق المؤقت إذا كنت ستستخدمه في التصدير، ولا تعتمد على hotlink دائم.
+
+- لا توزع الفيديو خاماً أو تبيعه منفرداً.
+
+- افحص العلامات التجارية والأشخاص والحقوق الإضافية.
+
+أنشئ cache key بهذا الشكل:
+
+```
+pixabay:{normalizedQuery}:{page}:{orientation}:{filtersHash}
+```
+
+---
+
+## المصدر الثالث: Coverr API
+
+### هل يحتاج API Key؟
+
+نعم في API الجديد. ضع المفتاح في:
+
+```
+COVERR_API_KEY=your_key_here
+```
+
+### التوثيق الرسمي
+
+```
+https://coverr.co/developers
+https://api.coverr.co/docs
+```
+
+### Endpoint البحث
+
+توضح صفحة المطورين Endpoint مثل:
+
+```
+GET https://api.coverr.co/videos?sort=popularity
+```
+
+استخدم المصادقة التي يطلبها التوثيق الحالي للمفتاح. لا تخمن Header إذا تغيّر التوثيق؛ اجعل اسم Header في adapter قابلاً للتعديل من متغير بيئة أو ملف إعدادات.
+
+في أغلب أمثلة Coverr الحديثة يكون المفتاح مرتبطاً بحساب API. افحص response status وresponse body وسجّل الخطأ بدلاً من إرجاع قائمة فارغة.
+
+### النتيجة
+
+حوّل:
+
+- `id` أو المعرّف الموجود في response إلى `providerAssetId`.
+
+- `title` إلى `title`.
+
+- `description` إلى `description`.
+
+- `thumbnail` إلى `thumbnailUrl`.
+
+- رابط MP4 أو الملف الذي يعيده API إلى `downloadUrl`.
+
+- `tags` إلى `providerMetadata.tags`.
+
+- رابط صفحة Coverr إلى `sourcePageUrl`.
+
+### النيتشات المناسبة
+
+B-roll التجاري، الطبيعة، السفر، الأشخاص، الأعمال، الخلفيات، والموسيقى.
+
+### القيود الضرورية
+
+- طبقة API المجانية محدودة، وتوضح صفحة المطورين رقماً تجريبياً قدره 50 استدعاءً في الساعة.
+
+- رخصة Coverr تسمح بالاستخدام التجاري، لكنها تمنع إنشاء خدمة مشابهة أو منافسة تعتمد على تجميع محتوى Coverr.
+
+- تمنع الرخصة استخدام المحتوى لتدريب نماذج AI أو إنشاء dataset.
+
+- لذلك اجعل Coverr اختيارياً ومعطلاً افتراضياً في وضع `public SaaS video generator`، أو اعرض للموقع تحذيراً بضرورة الحصول على إذن تجاري من Coverr قبل الإطلاق.
+
+- لا تستخدم محتوى Coverr لتدريب نموذج اختيار اللقطات.
+
+أنشئ إعداداً:
+
+```
+COVERR_ENABLED=false
+COVERR_ALLOWED_FOR_PRODUCTION=false
+```
+
+ولا تسمح بتفعيله للإنتاج إلا من لوحة الإدارة.
+
+---
+
+## المصدر الرابع: NASA APIs وNASA Image and Video Library
+
+### هل يحتاج API Key؟
+
+هناك شيئان مختلفان يجب عدم خلطهما:
+
+1. بوابة NASA العامة:
+
+```
+https://api.nasa.gov/
+```
+
+هذه تستخدم `NASA_API_KEY` لبعض خدمات NASA وتقدم حدوداً أعلى من `DEMO_KEY`.
+
+1. مكتبة NASA للصور والفيديو:
+
+```
+https://images-api.nasa.gov
+```
+
+وثائق المكتبة توضح endpoints البحث والأصل وmetadata وcaptions. لا تفترض أن `NASA_API_KEY` مطلوب لكل Endpoint في `images-api.nasa.gov`; اختبر endpoint وفق التوثيق الرسمي الحالي.
+
+ضع المتغير تحسباً لخدمات NASA الأخرى:
+
+```
+NASA_API_KEY=your_key_here
+```
+
+### التوثيق الرسمي
+
+```
+https://api.nasa.gov/
+https://images.nasa.gov/docs/images.nasa.gov_api_docs.pdf
+https://www.nasa.gov/nasa-brand-center/images-and-media/
+```
+
+### Endpoint البحث
+
+```
+GET https://images-api.nasa.gov/search
+```
+
+Parameters:
+
+```
+q
+media_type=video
+keywords
+center
+location
+year_start
+year_end
+page
+page_size
+```
+
+مثال:
+
+```javascript
+const url = new URL("https://images-api.nasa.gov/search" );
+url.searchParams.set("q", query);
+url.searchParams.set("media_type", "video");
+url.searchParams.set("page_size", "50");
+
+const response = await fetch(url);
+```
+
+### الحصول على الملفات
+
+بعد اختيار `nasa_id`:
+
+```
+GET https://images-api.nasa.gov/asset/{nasa_id}
+GET https://images-api.nasa.gov/metadata/{nasa_id}
+GET https://images-api.nasa.gov/captions/{nasa_id}
+```
+
+من manifest اختر ملف MP4 أو الملف الأنسب للدقة. لا تستخدم رابط preview فقط في التصدير النهائي.
+
+### النيتشات المناسبة
+
+الفضاء، الفلك، الصواريخ، القمر، المريخ، محطة الفضاء، المناخ، الأرض من الفضاء، العلوم، والهندسة.
+
+### حقوق الاستخدام
+
+- لا تفترض أن كل ملف NASA Public Domain.
+
+- افحص metadata وصفحة الأصل.
+
+- قد توجد مواد طرف ثالث مرخصة لـNASA فقط.
+
+- لا تستخدم شعار NASA أو اسم NASA لإيحاء بالتأييد.
+
+- احذر من الاستخدام التجاري لصور الأشخاص ورواد الفضاء والعلامات.
+
+- خزّن عبارة مصدر مثل `NASA Image and Video Library` ورابط الأصل.
+
+- استخدم NASA في الفيديوهات العلمية والتحريرية بطريقة factual، وليس كإعلان يوحي بتأييد الموقع.
+
+اجعل `rightsStatus` = `needs_review` افتراضياً عندما تحتوي المادة على أشخاص يمكن التعرف عليهم أو علامات أو حقوق غير واضحة.
+
+---
+
+# 3. المصادر التي لا تحتاج API Key غالباً
+
+## Internet Archive
+
+### هل يحتاج API Key؟
+
+لا يحتاج عادةً إلى API Key للبحث العام والـmetadata. يجب عدم افتراض أن كل ملف قابل للاستخدام التجاري.
+
+### التوثيق
+
+```
+https://archive.org/developers/
+https://archive.org/advancedsearch.php
+```
+
+### البحث
+
+استخدم Advanced Search بصيغة JSON:
+
+```
+https://archive.org/advancedsearch.php?q=mediatype:movies+AND+title:(space )&fl[]=identifier,title,creator,licenseurl,rights&output=json
+```
+
+يمكن البحث أيضاً في `description`, `subject`, `collection`, `year` و`mediatype`.
+
+### الخطوات الصحيحة
+
+1. أرسل البحث إلى Advanced Search.
+
+1. استخرج `identifier` لكل item.
+
+1. اجلب metadata:
+
+```
+GET https://archive.org/metadata/{identifier}
+```
+
+1. ابحث في metadata عن `licenseurl`, `rights`, `creator`, `collection` وامتدادات الملفات.
+
+1. اختر MP4 أو OGG أو الملف المناسب فقط.
+
+1. احفظ صفحة item والرخصة مع المشروع.
+
+1. لا تقبل نتيجة `unknown` في التصدير التجاري دون مراجعة.
+
+### النيتشات
+
+التاريخ، الحرب، المدن القديمة، الأخبار الأرشيفية، التكنولوجيا، الأفلام التعليمية القديمة، الوثائقيات، والثقافة.
+
+### مهم جداً
+
+وجود الفيديو في Internet Archive لا يجعله تلقائياً Public Domain. يجب فحص ترخيص كل item.
+
+---
+
+## Wikimedia Commons
+
+### هل يحتاج API Key؟
+
+لا يحتاج API Key للبحث العام في MediaWiki API.
+
+### Endpoint
+
+```
+GET https://commons.wikimedia.org/w/api.php
+```
+
+مثال بحث:
+
+```
+https://commons.wikimedia.org/w/api.php?action=query&generator=search&gsrsearch=apollo&gsrnamespace=6&prop=imageinfo&iiprop=url|mime|size|extmetadata&format=json
+```
+
+### الخطوات الصحيحة
+
+1. استخدم `action=query` و`generator=search` للبحث في namespace الملفات `6`.
+
+1. اطلب `imageinfo` و`extmetadata`.
+
+1. استخرج رابط الملف، creator، license، attribution، وsource page.
+
+1. ارفض الملف إذا لم تستطع استخراج الترخيص من صفحة الوصف.
+
+1. تعامل مع CC BY وCC BY-SA وPublic Domain بشكل مختلف.
+
+1. أنشئ attribution حسب نوع الرخصة.
+
+### النيتشات
+
+التاريخ، الجغرافيا، العلوم، الحروب، الأشخاص التاريخيون، العمارة، الطبيعة، والمواد التعليمية.
+
+### مهم جداً
+
+ليس كل ملف في Wikimedia Commons Public Domain. الترخيص خاص بالملف ويجب قراءته من صفحة الوصف.
+
+---
+
+## Library of Congress
+
+### هل يحتاج API Key؟
+
+الـJSON API العام لـLibrary of Congress لا يحتاج عادةً API Key.
+
+### التوثيق
+
+```
+https://www.loc.gov/apis/
+```
+
+### Endpoint نمطي
+
+```
+https://www.loc.gov/search/?q=railroad&fo=json
+```
+
+### الخطوات الصحيحة
+
+1. استخدم `fo=json`.
+
+1. ابحث عن `original_format` أو الفلاتر المتعلقة بالفيديو والأفلام.
+
+1. استخرج `id`, `title`, `date`, `description`, `resources` وبيانات الحقوق.
+
+1. استخدم رابط Streaming أو resource المناسب بدلاً من scraping صفحة HTML.
+
+1. افحص حقوق العنصر أو المجموعة قبل التصدير.
+
+### النيتشات
+
+التاريخ الأمريكي، الأخبار القديمة، الثقافة، الموسيقى، المدن، السياسة، المجتمع، والمواد الوثائقية.
+
+---
+
+## National Archives Catalog / NARA
+
+### هل يحتاج API Key؟
+
+لا تعتمد على وجود مفتاح عام في التطبيق قبل مراجعة التوثيق الحالي. استخدم Catalog API الرسمي، وأضف `NARA_API_KEY` فقط إذا طلبت NARA ذلك في حسابك أو endpoint الذي ستستخدمه.
+
+### التوثيق
+
+```
+https://www.archives.gov/research/catalog/help/api
+https://catalog.archives.gov/api/v2/api-docs/
+```
+
+### الخطوات الصحيحة
+
+1. ابحث بالكلمة والحقول والفترة الزمنية.
+
+1. اطلب JSON metadata.
+
+1. استخرج الأصول الرقمية، ومنها الفيديو.
+
+1. خزّن record URL وحقوق العنصر وبيانات المصدر.
+
+1. لا تفترض أن كل سجل حكومي متاح تجارياً بلا قيود.
+
+1. احترم شروط استخدام Catalog API وعدم إساءة استعماله أو إعادة نشر بيانات شخصية.
+
+### النيتشات
+
+التاريخ الأمريكي، الحروب، الطيران، الفضاء، الرؤساء، الحكومة، التكنولوجيا، والمدن.
+
+---
+
+# 4. ترتيب استخدام المصادر داخل محرك الفيديو
+
+طبّق استراتيجية fallback بهذا الترتيب:
+
+## عند طلب فيديو علمي أو فضائي
+
+```
+NASA -> NARA -> Wikimedia -> Pixabay
+```
+
+## عند طلب وثائقي تاريخي
+
+```
+NARA -> Library of Congress -> Internet Archive -> Wikimedia -> Pixabay B-roll
+```
+
+## عند طلب فيديو جريمة
+
+```
+NARA/LOC/Archive/Wikimedia للمواد التاريخية فقط
+ثم Pixabay أو Pexels للقطات توضيحية
+```
+
+لا تجعل النظام يكتب في السيناريو أن اللقطة من الجريمة إذا كانت مجرد stock.
+
+## عند طلب B-roll عام
+
+```
+Pixabay -> Pexels -> Coverr إذا كان مسموحاً في إعدادات المشروع
+```
+
+---
+
+# 5. Backend endpoints المطلوبة في الموقع
+
+أنشئ هذه المسارات:
+
+```
+GET  /api/video-sources
+POST /api/video-sources/{provider}/test
+GET  /api/videos/search?query=...&category=...&source=...
+POST /api/videos/validate-license
+POST /api/videos/download
+GET  /api/videos/{assetId}/metadata
+```
+
+## `/api/videos/search`
+
+يجب أن:
+
+1. يستقبل query وcategory وsource وorientation وduration.
+
+1. يحدد المصادر المفعلة.
+
+1. ينفذ الطلبات بالتوازي مع timeout واضح.
+
+1. يطبق rate limit لكل مزود.
+
+1. يستخدم cache.
+
+1. يوحد النتيجة وفق schema السابق.
+
+1. يزيل النتائج المكررة.
+
+1. يرتب النتائج حسب relevance وrightsStatus والجودة.
+
+1. يعيد `providerErrors` منفصلة حتى لا تختفي أخطاء المصادر.
+
+مثال response:
+
+```json
+{
+  "query": "ancient city",
+  "results": [],
+  "sourcesUsed": ["pixabay", "wikimedia", "archive"],
+  "providerErrors": [
+    {
+      "provider": "pexels",
+      "status": 429,
+      "message": "Rate limit reached"
+    }
+  ],
+  "cache": {
+    "hit": false,
+    "expiresAt": "..."
+  }
+}
+```
+
+---
+
+# 6. صفحة إعداد API داخل الموقع
+
+أنشئ صفحة Admin باسم **Video Sources** تحتوي على بطاقة لكل مصدر:
+
+- اسم المصدر.
+
+- نوع المصدر: Stock / Historical / Scientific.
+
+- هل يحتاج API Key؟
+
+- حقل API Key مخفي.
+
+- زر Save.
+
+- زر Test Connection.
+
+- آخر وقت نجاح.
+
+- عدد الطلبات المستخدمة.
+
+- حالة المصدر.
+
+- رابط التوثيق الرسمي.
+
+- رابط الترخيص.
+
+- ملاحظة القيود.
+
+لا تعرض API Key بعد حفظه. اعرض فقط:
+
+```
+••••••••••••ABCD
+```
+
+أضف زر `Disable provider` بدلاً من حذف المفتاح مباشرة.
+
+---
+
+# 7. متطلبات الجودة وعدم تكرار مشكلة المصادر غير العاملة
+
+نفذ الآتي قبل اعتبار التكامل مكتملاً:
+
+1. كل مصدر له Adapter مستقل.
+
+1. كل Adapter له اختبار اتصال حقيقي.
+
+1. كل Adapter يعالج 401 و403 و404 و429 و500 وtimeout.
+
+1. كل Adapter يسجل response body عند الخطأ، بدون كشف API Key.
+
+1. اختبر query باللغة الإنجليزية لأن معظم هذه APIs تبحث أفضل بالإنجليزية.
+
+1. أضف fallback إذا كان مزود واحد متوقفاً.
+
+1. لا تعرض قائمة فارغة بدون رسالة توضح أن المصدر فشل أو لا توجد نتائج.
+
+1. لا تستخدم روابط تخمينية أو endpoints غير موجودة في التوثيق.
+
+1. لا تستخدم scraping إلا بموافقة المصدر.
+
+1. احتفظ بصفحة المصدر والرخصة مع كل فيديو يدخل Timeline.
+
+1. قبل تصدير الفيديو، شغّل License Validator.
+
+1. إذا كانت `rightsStatus=unknown`، اعرض تحذيراً واطلب مراجعة يدوية.
+
+1. اجعل جميع روابط التحميل خلف backend أو signed URL.
+
+1. استخدم تخزيناً مؤقتاً بمدة محددة، مع زر لمسح الكاش.
+
+1. اكتب اختبارات Unit لكل Adapter واختبار Integration لكل مصدر مفعّل.
+
+---
+
+# 8. متطلبات التسليم من Replit Agent
+
+قبل إنهاء المهمة، أريد منك أن:
+
+1. تفحص البنية الحالية للمشروع ولا تعيد كتابة التطبيق كله.
+
+1. تحدد أين توجد خدمة البحث الحالية عن الفيديو.
+
+1. تنشئ طبقة `video-sources` أو `providers` منظمة.
+
+1. تضيف Secrets والأسماء المذكورة أعلاه إلى قائمة الإعدادات فقط، ولا تضع القيم داخل الكود.
+
+1. تضيف صفحة Admin لإدارة المصادر.
+
+1. تربط نتائج البحث مع Timeline الحالي.
+
+1. تعرض attribution وsource page في لوحة معلومات كل لقطة.
+
+1. تضيف License Validator قبل التصدير.
+
+1. تضيف اختبارات لكل مصدر.
+
+1. تشغل lint وtypecheck وtests.
+
+1. تشرح في النهاية الملفات التي غيرتها، وكيف أضيف كل API Key، وكيف أختبر كل مصدر.
+
+1. لا تقل إن المصدر متصل إلا بعد تنفيذ طلب اختبار حقيقي ناجح.
+
+1. إذا كان أي endpoint غير متاح أو يحتاج موافقة من المزود، اذكر ذلك صراحة ولا تنشئ تكاملاً وهمياً.
+
+ابدأ أولاً بفحص التطبيق الحالي ثم نفّذ التكامل على مراحل، وابدأ بالمصادر التي لا تحتاج API Key: NASA Image API، Internet Archive، Wikimedia Commons، Library of Congress، وNARA. بعد ذلك أضف Pexels وPixabay وCoverr عبر Secrets واختبارات الاتصال.
+
+وهناك مشكلة في تكرار اصوات fish audio تتكرر اصوات مستنسخة وهذا هي اخطاء:
+## Error Type Console Error ## Error Message Encountered two children with the same key, `535d00587f6f476081b87ef1b946dcbb`. Keys should be unique so that components maintain their identity across updates. Non-unique keys may cause children to be duplicated and/or omitted — the behavior is unsupported and could change in a future version. at div (<anonymous>:null:null) at <unknown> (src/app/page.tsx:1714:19) at  Array.map (<anonymous>:null:null) at Home (src/app/page.tsx:1707:30) ## Code Frame 1712 | 1713 |                 return ( > 1714 |                   <div |                   ^ 1715 |                     key={v.id} 1716 |                     onClick={() => setSelectedVoice(v.id)} 1717 |                     className={`cursor-pointer p-4 rounded-2xl borde... Next.js version: 16.2.12 (Turbopack)
+
+وهناك مشكلة اخرى بعد ان تنهي اصلاح مشاكل اخرى هذه مشكلة اخيرة وهي كيف يقوم بمونتاج فيديو يحضر لقطات سواء صور او فيديوهات لكي يجمعها في فيديو ولكن كانت هناك مشكلة في اي فيديو وهي انه يكون عبارة عن صور فقط فيها ايفكيت لتحركها مع انه يحضر اغلبية لقطات عبارة عن فيديوهات لكن يحولها لفريمات ويأخذ فريم من لقطة ويجعلها هي لقطة كاملة اصلح هذه مشكلة اجعله عندما يحضر مشهد عبارة عن فيديو يستخدم فيديو متحرك وليس يأخذ فريم فقط بل يأخذ مشهد فيديو كامل ويقطع منه لقطة مناسبة للمشهد.
+وايضا في اخر اجعل كابشن خيار تلقائي يعني يختار مستخدم هل يريد كابشن او لا.

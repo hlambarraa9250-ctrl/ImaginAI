@@ -104,6 +104,8 @@ async def run_pipeline(
     project_id: str = "default",
     niche_id: str | None = None,
     custom_niche: str | None = None,
+    custom_niche_description: str | None = None,
+    niche_sources: list[str] | None = None,
     caption_config: dict | None = None,
     input_mode: str = "ai_generated",
     provided_script: str | None = None,
@@ -148,6 +150,11 @@ async def run_pipeline(
             print(f"[Pipeline] Provided script parsed into {len(scenes)} scenes.")
         else:
             from app.services.gemini_script import generate_script
+            script_context = additional_context or ""
+            if custom_niche_description:
+                script_context = (
+                    f"{script_context}\n\nوصف النيتش المخصص: {custom_niche_description}".strip()
+                )
             script = await generate_script(
                 idea,
                 duration,
@@ -155,7 +162,7 @@ async def run_pipeline(
                 job_dir,
                 niche_id=niche_id,
                 custom_niche=custom_niche,
-                additional_context=additional_context,
+                additional_context=script_context or None,
                 device_id=device_id,
             )
         _set_stage(job_id, "script", "done")
@@ -184,6 +191,8 @@ async def run_pipeline(
                     "project_id": project_id,
                     "niche_id": niche_id,
                     "custom_niche": custom_niche,
+                    "custom_niche_description": custom_niche_description,
+                    "niche_sources": niche_sources,
                     "caption_config": caption_config,
                 }
                 (job_dir / "pipeline_state.json").write_text(
@@ -269,7 +278,8 @@ async def run_pipeline(
         _set_stage(job_id, "footage", "processing")
         from app.services.footage import fetch_all_footage
         shots_per_scene = await fetch_all_footage(
-            script.scenes, audio_durations, job_dir, style, niche_id=niche_id, device_id=device_id
+            script.scenes, audio_durations, job_dir, style, niche_id=niche_id,
+            device_id=device_id, source_priority=niche_sources,
         )
         _set_stage(job_id, "footage", "done")
 
@@ -279,10 +289,18 @@ async def run_pipeline(
             shots_list = shots_per_scene[idx] if idx < len(shots_per_scene) else []
             shots_data = []
             for s_idx, shot_path in enumerate(shots_list):
+                asset_metadata = {}
+                attr_file = Path(shot_path).with_name(f"{Path(shot_path).stem}_attr.json")
+                if attr_file.is_file():
+                    try:
+                        asset_metadata = json.loads(attr_file.read_text(encoding="utf-8"))
+                    except (OSError, json.JSONDecodeError):
+                        asset_metadata = {}
                 shots_data.append({
                     "shot_index": s_idx,
                     "clip_path": shot_path,
                     "stream_url": f"/api/jobs/{job_id}/clips/{idx}/{s_idx}",
+                    "metadata": asset_metadata,
                 })
             review_scenes.append({
                 "scene_index": idx,
@@ -304,6 +322,8 @@ async def run_pipeline(
             "project_id": project_id,
             "niche_id": niche_id,
             "custom_niche": custom_niche,
+            "custom_niche_description": custom_niche_description,
+            "niche_sources": niche_sources,
             "caption_config": caption_config,
             "audio_paths": audio_paths,
             "audio_durations": audio_durations,
@@ -420,8 +440,12 @@ async def _resume_pipeline_impl(
     try:
         # ── Stage 4: Captions ────────────────────────────────────────────
         _set_stage(job_id, "captions", "processing")
-        from app.services.captions import transcribe_all
-        caption_data = await transcribe_all(audio_paths, job_dir, scenes=script_scenes, device_id=device_id)
+        captions_enabled = (caption_config or {}).get("enabled", True) is not False
+        if captions_enabled:
+            from app.services.captions import transcribe_all
+            caption_data = await transcribe_all(audio_paths, job_dir, scenes=script_scenes, device_id=device_id)
+        else:
+            caption_data = [[] for _ in audio_paths]
         _set_stage(job_id, "captions", "done")
 
         # ── Stage 5: Render ──────────────────────────────────────────────
@@ -556,6 +580,7 @@ async def _approve_sections_and_resume_impl(job_id: str, apply_sections: bool) -
     project_id = state.get("project_id", "default")
     niche_id = state.get("niche_id")
     custom_niche = state.get("custom_niche")
+    niche_sources = state.get("niche_sources")
     caption_config = state.get("caption_config")
 
     # ── Stage 2: TTS ─────────────────────────────────────────────────
@@ -570,7 +595,8 @@ async def _approve_sections_and_resume_impl(job_id: str, apply_sections: bool) -
     _set_stage(job_id, "footage", "processing")
     from app.services.footage import fetch_all_footage
     shots_per_scene = await fetch_all_footage(
-            script.scenes, audio_durations, job_dir, style, niche_id=niche_id, device_id=device_id
+            script.scenes, audio_durations, job_dir, style, niche_id=niche_id,
+            device_id=device_id, source_priority=niche_sources,
     )
     _set_stage(job_id, "footage", "done")
 
@@ -580,10 +606,18 @@ async def _approve_sections_and_resume_impl(job_id: str, apply_sections: bool) -
         shots_list = shots_per_scene[idx] if idx < len(shots_per_scene) else []
         shots_data = []
         for s_idx, shot_path in enumerate(shots_list):
+            asset_metadata = {}
+            attr_file = Path(shot_path).with_name(f"{Path(shot_path).stem}_attr.json")
+            if attr_file.is_file():
+                try:
+                    asset_metadata = json.loads(attr_file.read_text(encoding="utf-8"))
+                except (OSError, json.JSONDecodeError):
+                    asset_metadata = {}
             shots_data.append({
                 "shot_index": s_idx,
                 "clip_path": shot_path,
                 "stream_url": f"/api/jobs/{job_id}/clips/{idx}/{s_idx}",
+                "metadata": asset_metadata,
             })
         review_scenes.append({
             "scene_index": idx,
@@ -605,6 +639,8 @@ async def _approve_sections_and_resume_impl(job_id: str, apply_sections: bool) -
         "project_id": project_id,
         "niche_id": niche_id,
         "custom_niche": custom_niche,
+        "custom_niche_description": state.get("custom_niche_description"),
+        "niche_sources": niche_sources,
         "caption_config": caption_config,
         "audio_paths": audio_paths,
         "audio_durations": audio_durations,

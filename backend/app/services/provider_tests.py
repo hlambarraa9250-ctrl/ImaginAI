@@ -102,4 +102,16 @@ async def test_provider(provider: str, api_key: str) -> dict[str, Any]:
             {},
             {"api_key": api_key, "date": "2020-01-01"},
         )
+    if provider == "coverr":
+        return await _test_http(
+            "https://api.coverr.co/videos",
+            {"Authorization": f"Bearer {api_key}"},
+            {"page_size": "1"},
+        )
+    if provider == "nara":
+        return await _test_http(
+            "https://catalog.archives.gov/api/v2/records/search",
+            {"x-api-key": api_key},
+            {"q": "constitution"},
+        )
     return _result("invalid", "Unsupported provider.")
