@@ -153,7 +153,7 @@ Rules:
   - If the user's idea is written in English, narration MUST be 100% in English.
   - If the user's idea is written in French, German, Spanish, or any other language, narration MUST be in that SAME language.
   - NEVER translate or switch narration to a different language.
-- Visual keywords should ALWAYS be in English (for stock footage search).
+- Visual keywords should ALWAYS be in English (for stock footage search). For every scene, use concrete subjects/actions from that scene's narration and vary them from adjacent scenes. Never use generic-only terms such as "cinematic", "documentary", "video", or "background".
 - {style_instruction}{niche_prompt}{overlay_instruction}{GOLDEN_RULE_PROMPT}
 """
 

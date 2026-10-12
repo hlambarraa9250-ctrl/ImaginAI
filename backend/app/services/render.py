@@ -512,17 +512,38 @@ async def render_video(
         for path in scene_outputs:
             f.write(f"file '{path.replace(chr(92), '/')}'\n")
 
-    await asyncio.to_thread(
-        _run_ffmpeg,
-        [
-            "-f", "concat",
-            "-safe", "0",
-            "-i", concat_file,
-            "-c", "copy",
-            final_output,
-        ],
-        "Final Scene Concatenation",
-    )
+    try:
+        await asyncio.to_thread(
+            _run_ffmpeg,
+            [
+                "-f", "concat",
+                "-safe", "0",
+                "-i", concat_file,
+                "-c", "copy",
+                final_output,
+            ],
+            "Final Scene Concatenation",
+        )
+    except RuntimeError as copy_error:
+        print(f"[Render] Stream-copy concatenation failed ({type(copy_error).__name__}); retrying with a full encode.")
+        await asyncio.to_thread(
+            _run_ffmpeg,
+            [
+                "-fflags", "+genpts",
+                "-f", "concat",
+                "-safe", "0",
+                "-i", concat_file,
+                "-c:v", "libx264",
+                "-preset", "fast",
+                "-crf", "22",
+                "-pix_fmt", "yuv420p",
+                "-c:a", "aac",
+                "-b:a", "192k",
+                "-movflags", "+faststart",
+                final_output,
+            ],
+            "Final Scene Re-encode",
+        )
 
     print(f"[Render] Final video rendered successfully: {final_output}")
     return final_output

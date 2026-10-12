@@ -10,6 +10,7 @@ Splits long scenes into multiple shots according to style template max shot dura
 import asyncio
 import json
 import math
+import re
 import subprocess
 import time
 from pathlib import Path
@@ -88,7 +89,13 @@ def _is_landscape(path: str) -> bool:
 
 # ── Pexels search ───────────────────────────────────────────────────────────
 
-async def _search_pexels(keywords: list[str], min_duration: float, client: httpx.AsyncClient, device_id: str | None = None) -> list[dict]:
+async def _search_pexels(
+    keywords: list[str],
+    min_duration: float,
+    client: httpx.AsyncClient,
+    device_id: str | None = None,
+    page: int = 1,
+) -> list[dict]:
     """Search Pexels Videos API with orientation=landscape. Returns candidate video list."""
     query = " ".join(keywords[:3])
     url = "https://api.pexels.com/videos/search"
@@ -96,6 +103,7 @@ async def _search_pexels(keywords: list[str], min_duration: float, client: httpx
     params = {
         "query": query,
         "per_page": 10,
+        "page": page,
         "size": "medium",
         "orientation": "landscape",  # Force horizontal orientation
     }
@@ -135,10 +143,16 @@ async def _search_pexels(keywords: list[str], min_duration: float, client: httpx
 
 # ── Pixabay search (with caching) ───────────────────────────────────────────
 
-async def _search_pixabay(keywords: list[str], min_duration: float, client: httpx.AsyncClient, device_id: str | None = None) -> list[dict]:
+async def _search_pixabay(
+    keywords: list[str],
+    min_duration: float,
+    client: httpx.AsyncClient,
+    device_id: str | None = None,
+    page: int = 1,
+) -> list[dict]:
     """Search Pixabay Videos API with orientation=horizontal and 24h caching."""
     query = " ".join(keywords[:3])
-    cache_key = query.lower().strip()
+    cache_key = f"video_{query.lower().strip()}_page_{page}"
 
     cache = _load_pixabay_cache()
     if cache_key in cache:
@@ -152,6 +166,7 @@ async def _search_pixabay(keywords: list[str], min_duration: float, client: http
         "key": get_pixabay_key(device_id=device_id),
         "q": query,
         "per_page": 10,
+        "page": page,
         "safesearch": "true",
         "orientation": "horizontal",  # Force horizontal orientation
     }
@@ -193,7 +208,12 @@ async def _search_pixabay(keywords: list[str], min_duration: float, client: http
 
 # ── Pixabay Images search (with caching) ───────────────────────────────────
 
-async def _search_pexels_images(keywords: list[str], client: httpx.AsyncClient, device_id: str | None = None) -> list[dict]:
+async def _search_pexels_images(
+    keywords: list[str],
+    client: httpx.AsyncClient,
+    device_id: str | None = None,
+    page: int = 1,
+) -> list[dict]:
     """Search Pexels Photos API with orientation=landscape."""
     query = " ".join(keywords[:3])
     url = "https://api.pexels.com/v1/search"
@@ -201,6 +221,7 @@ async def _search_pexels_images(keywords: list[str], client: httpx.AsyncClient, 
     params = {
         "query": query,
         "per_page": 10,
+        "page": page,
         "orientation": "landscape",
     }
     results = []
@@ -235,10 +256,15 @@ async def _search_pexels_images(keywords: list[str], client: httpx.AsyncClient, 
     return results
 
 
-async def _search_pixabay_images(keywords: list[str], client: httpx.AsyncClient, device_id: str | None = None) -> list[dict]:
+async def _search_pixabay_images(
+    keywords: list[str],
+    client: httpx.AsyncClient,
+    device_id: str | None = None,
+    page: int = 1,
+) -> list[dict]:
     """Search Pixabay Photos API with orientation=horizontal and 24h caching."""
     query = " ".join(keywords[:3])
-    cache_key = f"img_{query.lower().strip()}"
+    cache_key = f"img_{query.lower().strip()}_page_{page}"
 
     cache = _load_pixabay_cache()
     if cache_key in cache:
@@ -251,6 +277,7 @@ async def _search_pixabay_images(keywords: list[str], client: httpx.AsyncClient,
         "key": get_pixabay_key(device_id=device_id),
         "q": query,
         "per_page": 10,
+        "page": page,
         "safesearch": "true",
         "orientation": "horizontal",
         "image_type": "photo",
@@ -363,6 +390,84 @@ def _normalize_asset(candidate: dict, keywords: list[str]) -> dict:
             "providerTitle": candidate.get("title"),
         },
     }
+
+
+def _canonical_media_url(value: str) -> str:
+    try:
+        parsed = urlsplit(value.strip())
+        if parsed.scheme and parsed.netloc:
+            return f"{parsed.scheme.lower()}://{parsed.netloc.lower()}{parsed.path.rstrip('/')}"
+    except (AttributeError, ValueError):
+        pass
+    return value.split("?", 1)[0].split("#", 1)[0].rstrip("/")
+
+
+def _candidate_usage_keys(candidate: dict) -> set[str]:
+    """Stable identities used to prevent one source asset appearing twice in a video."""
+    source = str(candidate.get("source", candidate.get("provider", "unknown"))).lower()
+    keys = set()
+    asset_id = candidate.get("provider_asset_id") or candidate.get("id")
+    if asset_id is not None:
+        keys.add(f"asset:{source}:{asset_id}")
+
+    source_page = (
+        candidate.get("source_page_url")
+        or candidate.get("original_url")
+        or candidate.get("pixabay_page")
+        or candidate.get("page_url")
+    )
+    if source_page:
+        keys.add(f"page:{_canonical_media_url(str(source_page))}")
+    download_url = candidate.get("download_url")
+    if download_url:
+        keys.add(f"download:{_canonical_media_url(str(download_url))}")
+    return keys
+
+
+_GENERIC_VISUAL_TERMS = {
+    "cinematic", "documentary", "footage", "background", "video", "stock",
+    "visual", "scene", "shot", "style", "broll", "b-roll",
+}
+
+_SEARCH_STOPWORDS = {
+    "about", "after", "again", "against", "along", "also", "among", "and",
+    "any", "are", "around", "because", "been", "before", "being", "between",
+    "both", "but", "can", "could", "did", "does", "during", "each", "even",
+    "every", "from", "further", "had", "has", "have", "here", "hers", "him",
+    "his", "how", "into", "its", "just", "like", "many", "might", "more",
+    "most", "much", "must", "near", "not", "now", "only", "other", "our",
+    "out", "over", "own", "same", "she", "should", "since", "some", "such",
+    "than", "that", "the", "their", "them", "then", "there", "these", "they",
+    "this", "those", "through", "under", "until", "very", "was", "were",
+    "what", "when", "where", "which", "while", "who", "will", "with", "would",
+    "you", "your", "من", "إلى", "على", "في", "عن", "هذا", "هذه", "ذلك",
+    "التي", "الذي", "كان", "كانت", "هو", "هي", "ثم", "كما", "لكن",
+}
+
+
+def _scene_search_keywords(scene: ScriptScene) -> list[str]:
+    supplied = []
+    for keyword in scene.visual_keywords:
+        cleaned = str(keyword).strip()
+        if cleaned and cleaned.lower() not in _GENERIC_VISUAL_TERMS and cleaned.lower() not in supplied:
+            supplied.append(cleaned.lower())
+    if supplied:
+        return supplied[:5]
+
+    narration_terms = re.findall(r"[A-Za-z][A-Za-z'-]{3,}|[\u0600-\u06FF]{4,}", scene.narration.lower())
+    extracted = []
+    for term in narration_terms:
+        normalized = term.strip("'-")
+        if (
+            len(normalized) >= 4
+            and normalized not in _SEARCH_STOPWORDS
+            and normalized not in _GENERIC_VISUAL_TERMS
+            and normalized not in extracted
+        ):
+            extracted.append(normalized)
+        if len(extracted) == 5:
+            break
+    return extracted or ["documentary", "stock footage"]
 
 
 async def _search_coverr(
@@ -870,17 +975,17 @@ async def fetch_footage_for_shot(
 ) -> str:
     """Fetch one validated horizontal asset using the niche's source priority."""
     searchers = {
-        "pexels_video": lambda: _search_pexels(keywords, min_duration, client, device_id),
-        "pixabay_video": lambda: _search_pixabay(keywords, min_duration, client, device_id),
-        "pexels_image": lambda: _search_pexels_images(keywords, client, device_id),
-        "pixabay_image": lambda: _search_pixabay_images(keywords, client, device_id),
-        "coverr_video": lambda: _search_coverr(keywords, client, device_id),
-        "nara": lambda: _search_nara(keywords, client, device_id),
-        "wikimedia": lambda: _search_wikimedia(keywords, client),
-        "archive_org": lambda: _search_archive_org(keywords, client),
-        "loc": lambda: _search_loc(keywords, client),
-        "nasa": lambda: _search_nasa(keywords, client),
-        "nasa_apod": lambda: _search_nasa_apod(client, device_id),
+        "pexels_video": lambda page=1: _search_pexels(keywords, min_duration, client, device_id, page),
+        "pixabay_video": lambda page=1: _search_pixabay(keywords, min_duration, client, device_id, page),
+        "pexels_image": lambda page=1: _search_pexels_images(keywords, client, device_id, page),
+        "pixabay_image": lambda page=1: _search_pixabay_images(keywords, client, device_id, page),
+        "coverr_video": lambda page=1: _search_coverr(keywords, client, device_id),
+        "nara": lambda page=1: _search_nara(keywords, client, device_id),
+        "wikimedia": lambda page=1: _search_wikimedia(keywords, client),
+        "archive_org": lambda page=1: _search_archive_org(keywords, client),
+        "loc": lambda page=1: _search_loc(keywords, client),
+        "nasa": lambda page=1: _search_nasa(keywords, client),
+        "nasa_apod": lambda page=1: _search_nasa_apod(client, device_id),
     }
     priority = source_priority or [
         "archive_org", "loc", "wikimedia", "nasa", "nara",
@@ -889,53 +994,57 @@ async def fetch_footage_for_shot(
     chosen = None
     final_output_path = output_path
     attempts_made = 0
+    paginated_sources = {"pexels_video", "pixabay_video", "pexels_image", "pixabay_image"}
 
     for source in priority:
         searcher = searchers.get(source)
         if not searcher:
             continue
-        attempts_made += 1
-        try:
-            candidates = await searcher()
-        except Exception as exc:
-            print(f"[Footage] Source '{source}' unavailable ({type(exc).__name__}).")
-            continue
-
-        ordered_candidates = [
-            candidate for candidate in candidates
-            if candidate.get("download_url") and candidate["download_url"] not in used_urls
-        ] + [
-            candidate for candidate in candidates
-            if candidate.get("download_url") and candidate["download_url"] in used_urls
-        ]
-        for candidate in ordered_candidates:
-            target_path = output_path
-            if candidate.get("is_image", False) and not target_path.lower().endswith((".jpg", ".jpeg", ".png", ".webp")):
-                target_path = str(Path(output_path).with_suffix(".jpg"))
+        page_numbers = range(1, 4) if source in paginated_sources else (1,)
+        for page_number in page_numbers:
+            attempts_made += 1
             try:
-                await _download_video(candidate["download_url"], target_path, client)
-                if not _is_landscape(target_path):
-                    print(f"[Footage] Rejected non-landscape or unprobeable asset from '{source}'.")
+                candidates = await searcher(page_number)
+            except Exception as exc:
+                print(f"[Footage] Source '{source}' unavailable ({type(exc).__name__}).")
+                continue
+
+            # Never fall back to an asset already used elsewhere in this video.
+            unused_candidates = [
+                candidate for candidate in candidates
+                if candidate.get("download_url")
+                and not (_candidate_usage_keys(candidate) & used_urls)
+            ]
+            for candidate in unused_candidates:
+                target_path = output_path
+                if candidate.get("is_image", False) and not target_path.lower().endswith((".jpg", ".jpeg", ".png", ".webp")):
+                    target_path = str(Path(output_path).with_suffix(".jpg"))
+                try:
+                    await _download_video(candidate["download_url"], target_path, client)
+                    if not _is_landscape(target_path):
+                        print(f"[Footage] Rejected non-landscape or unprobeable asset from '{source}'.")
+                        Path(target_path).unlink(missing_ok=True)
+                        continue
+                    chosen = candidate
+                    final_output_path = target_path
+                    used_urls.update(_candidate_usage_keys(candidate))
+                    print(
+                        f"[Footage] Selected '{source}' "
+                        f"({'IMAGE' if candidate.get('is_image') else 'VIDEO'}) for keywords={keywords}"
+                    )
+                    break
+                except Exception as download_error:
+                    print(f"[Footage] Candidate from '{source}' failed ({type(download_error).__name__}); trying next.")
                     Path(target_path).unlink(missing_ok=True)
-                    continue
-                chosen = candidate
-                final_output_path = target_path
-                used_urls.add(candidate["download_url"])
-                print(
-                    f"[Footage] Selected '{source}' "
-                    f"({'IMAGE' if candidate.get('is_image') else 'VIDEO'}) for keywords={keywords}"
-                )
+            if chosen:
                 break
-            except Exception as download_error:
-                print(f"[Footage] Candidate from '{source}' failed ({type(download_error).__name__}); trying next.")
-                Path(target_path).unlink(missing_ok=True)
         if chosen:
             break
 
     if not chosen:
         raise RuntimeError(
             f"No configured video source returned usable media for keywords: {keywords} "
-            f"({attempts_made} source(s) tried)"
+            f"({attempts_made} search attempt(s); repeated assets are not reused)"
         )
 
     metadata = _normalize_asset(chosen, keywords)
@@ -1001,7 +1110,7 @@ async def fetch_all_footage(
                 attr = str(clips_dir / f"scene_{scene_idx}_shot_{shot_idx}_attr.json")
 
                 # Keyword variations per shot for variety
-                kw = scene.visual_keywords.copy()
+                kw = _scene_search_keywords(scene)
                 if shot_idx > 0 and len(kw) > 1:
                     # Rotate or modify keywords slightly for different shots
                     kw = kw[shot_idx % len(kw):] + kw[:shot_idx % len(kw)]

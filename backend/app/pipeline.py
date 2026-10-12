@@ -53,6 +53,31 @@ def _set_stage(job_id: str, stage: str, state: str) -> None:
     path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
+def _review_has_duplicate_footage(scenes: list[dict]) -> bool:
+    seen: set[str] = set()
+    for scene in scenes:
+        for shot in scene.get("shots", []):
+            metadata = shot.get("metadata") or {}
+            provider = str(metadata.get("provider") or "unknown").lower()
+            keys = set()
+            asset_id = metadata.get("providerAssetId") or metadata.get("provider_asset_id")
+            if asset_id:
+                keys.add(f"asset:{provider}:{asset_id}")
+            source_page = metadata.get("sourcePageUrl") or metadata.get("source_page_url")
+            if source_page:
+                from urllib.parse import urlsplit
+                parsed = urlsplit(str(source_page))
+                canonical = (
+                    f"{parsed.scheme.lower()}://{parsed.netloc.lower()}{parsed.path.rstrip('/')}"
+                    if parsed.scheme and parsed.netloc else str(source_page).rstrip("/")
+                )
+                keys.add(f"page:{canonical}")
+            if keys & seen:
+                return True
+            seen.update(keys)
+    return False
+
+
 def _validate_final_video(path: str) -> float:
     """Require a non-empty 1920x1080 MP4 with valid video/audio streams."""
     output = Path(path)
@@ -410,12 +435,76 @@ async def _resume_pipeline_impl(
 
     edited_map = {item["scene_index"]: item for item in edited_scenes}
 
+    if _review_has_duplicate_footage(raw_scenes):
+        print(f"[Resume Pipeline] Duplicate source assets found in job {job_id}; fetching unique footage before rendering.")
+        scenes_to_fetch = []
+        for idx, scene_info in enumerate(raw_scenes):
+            edited_item = edited_map.get(idx, {})
+            edited_narration = edited_item.get("narration") if "narration" in edited_item else scene_info.get("narration")
+            if edited_narration is not None:
+                scene_info.setdefault("audio_narration", scene_info.get("narration", ""))
+                scene_info["narration"] = edited_narration
+            scenes_to_fetch.append(ScriptScene(
+                narration=(scene_info.get("narration") or "").strip(),
+                visual_keywords=scene_info.get("visual_keywords", []),
+                estimated_seconds=scene_info.get("audio_duration", 5.0),
+            ))
+
+        from app.services.footage import fetch_all_footage
+        shots_per_scene = await fetch_all_footage(
+            scenes_to_fetch,
+            audio_durations,
+            job_dir,
+            style,
+            niche_id=niche_id,
+            device_id=device_id,
+            source_priority=review_data.get("niche_sources"),
+        )
+        for idx, scene_info in enumerate(raw_scenes):
+            refreshed_shots = []
+            for shot_idx, shot_path in enumerate(shots_per_scene[idx]):
+                attr_file = Path(shot_path).with_name(f"{Path(shot_path).stem}_attr.json")
+                try:
+                    metadata = json.loads(attr_file.read_text(encoding="utf-8")) if attr_file.is_file() else {}
+                except (OSError, json.JSONDecodeError):
+                    metadata = {}
+                refreshed_shots.append({
+                    "shot_index": shot_idx,
+                    "clip_path": shot_path,
+                    "stream_url": f"/api/jobs/{job_id}/clips/{idx}/{shot_idx}",
+                    "metadata": metadata,
+                })
+            scene_info["shots"] = refreshed_shots
+
+        if _review_has_duplicate_footage(raw_scenes):
+            raise RuntimeError("تعذر استبدال جميع اللقطات المكررة بمصادر فريدة. لم يتم إنشاء فيديو مكرر.")
+
+        review_data["shots_per_scene"] = shots_per_scene
+        review_data["scenes"] = raw_scenes
+        review_file.write_text(json.dumps(review_data, ensure_ascii=False, indent=2), encoding="utf-8")
+        from app.db import update_video
+        update_video(video_id=job_id, status="pending_review")
+        status_path = _status_path(job_id)
+        status_data = json.loads(status_path.read_text(encoding="utf-8"))
+        status_data.update({
+            "status": "pending_review",
+            "current_stage": "pending_review",
+            "error": "تم استبدال اللقطات المتكررة. راجع اللقطات الجديدة وأكد صلاحية مصادرها قبل الرندر.",
+        })
+        status_data.setdefault("stages", {}).update({
+            "footage": "done",
+            "captions": "pending",
+            "render": "pending",
+        })
+        status_path.write_text(json.dumps(status_data, ensure_ascii=False, indent=2), encoding="utf-8")
+        return
+
     script_scenes = []
     for idx, sc_info in enumerate(raw_scenes):
         edited_item = edited_map.get(idx, {})
         raw_new = edited_item.get("narration") if "narration" in edited_item else sc_info.get("narration")
         new_narration = (raw_new or "").strip()
-        old_narration = (sc_info.get("narration") or "").strip()
+        old_narration = (sc_info.get("audio_narration") or sc_info.get("narration") or "").strip()
 
         if "shots" in edited_item and isinstance(edited_item["shots"], list) and edited_item["shots"]:
             shots_per_scene[idx] = edited_item["shots"]
@@ -435,7 +524,14 @@ async def _resume_pipeline_impl(
             if new_audio_paths and len(new_audio_paths) > 0:
                 audio_paths[idx] = new_audio_paths[0]
                 audio_durations[idx] = get_audio_duration_ffprobe(new_audio_paths[0])
+                sc_info["narration"] = new_narration
+                sc_info["audio_narration"] = new_narration
                 print(f"[Resume Pipeline] Scene {idx} new audio duration: {audio_durations[idx]:.2f}s")
+
+    review_data["audio_paths"] = audio_paths
+    review_data["audio_durations"] = audio_durations
+    review_data["scenes"] = raw_scenes
+    review_file.write_text(json.dumps(review_data, ensure_ascii=False, indent=2), encoding="utf-8")
 
     try:
         # ── Stage 4: Captions ────────────────────────────────────────────
