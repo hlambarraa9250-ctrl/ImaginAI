@@ -24,6 +24,8 @@ from app.models import (
     JobRequest,
     JobStatusResponse,
     ProjectCreate,
+    ProjectRename,
+    ProjectVoiceRename,
     ProjectResponse,
     VideoResponse,
     ResumeJobRequest,
@@ -48,6 +50,11 @@ from app.db import (
     create_project,
     get_projects_by_device,
     get_project,
+    rename_project,
+    delete_project,
+    get_project_voice_settings,
+    rename_project_voice,
+    hide_project_voice,
     create_video,
     update_video,
     get_videos_by_device,
@@ -247,6 +254,65 @@ async def api_get_project(project_id: str, device_id: str = Depends(get_current_
     return {"project": proj, "videos": videos}
 
 
+@app.patch("/api/projects/{project_id}")
+async def api_rename_project(
+    project_id: str,
+    req: ProjectRename,
+    device_id: str = Depends(get_current_device),
+):
+    _assert_project_owner(project_id, device_id)
+    name = req.name.strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="يرجى إدخال اسم صالح للمشروع.")
+    return rename_project(project_id, name)
+
+
+@app.delete("/api/projects/{project_id}")
+async def api_delete_project(project_id: str, device_id: str = Depends(get_current_device)):
+    project = get_project(project_id)
+    _assert_project_owner(project_id, device_id)
+    videos = get_videos_by_project(project_id)
+    if any(video.get("status") in {"pending", "processing"} for video in videos):
+        raise HTTPException(
+            status_code=409,
+            detail="لا يمكن حذف مشروع أثناء توليد فيديو. انتظر انتهاء العملية ثم أعد المحاولة.",
+        )
+
+    deleted = delete_project(project_id)
+    if not deleted:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    jobs_root = JOBS_DIR.resolve()
+    storage_root = STORAGE_DIR.resolve()
+    for video in videos:
+        video_id = str(video.get("video_id", ""))
+        job_dir = (JOBS_DIR / video_id).resolve()
+        if video_id and job_dir.parent == jobs_root and job_dir.is_dir():
+            shutil.rmtree(job_dir, ignore_errors=True)
+
+        file_path = video.get("file_path")
+        if file_path:
+            candidate = Path(file_path).resolve()
+            if candidate.is_file() and any(
+                candidate != root and candidate.is_relative_to(root)
+                for root in (jobs_root, storage_root)
+            ):
+                try:
+                    candidate.unlink(missing_ok=True)
+                except OSError:
+                    pass
+
+    project_dir = (STORAGE_DIR / device_id / project_id).resolve()
+    if project_dir != storage_root and storage_root in project_dir.parents and project_dir.is_dir():
+        shutil.rmtree(project_dir, ignore_errors=True)
+
+    return {
+        "success": True,
+        "project_id": project_id,
+        "deleted_videos": len(videos),
+    }
+
+
 @app.get("/api/videos/{video_id}/stream")
 async def api_stream_video(video_id: str, device_id: str = Depends(get_current_device)):
     """Stream a stored video by video_id directly from permanent storage or jobs."""
@@ -275,9 +341,16 @@ async def api_stream_video(video_id: str, device_id: str = Depends(get_current_d
 
 
 @app.get("/api/voices")
-async def list_voices(device_id: str = Depends(get_current_device)):
+async def list_voices(
+    project_id: Optional[str] = Query(default=None),
+    device_id: str = Depends(get_current_device),
+):
     """Return available TTS providers and voices catalog, including user's custom cloned voices."""
     from app.services.fish_audio_tts import fetch_fish_audio_voices
+
+    if project_id:
+        _assert_project_owner(project_id, device_id)
+    voice_settings = get_project_voice_settings(project_id) if project_id else {}
     
     # Clone catalog list
     providers = json.loads(json.dumps(VOICE_PROVIDERS))
@@ -298,20 +371,53 @@ async def list_voices(device_id: str = Depends(get_current_device)):
             "is_custom": True,
         })
 
-    if fish_voices or custom_voices_list:
+    fish_provider = next((p for p in providers if p.get("provider") == "fish-audio"), None)
+    if fish_provider is not None:
+        available_fish_voices = custom_voices_list + (fish_voices or [])
+        if not available_fish_voices:
+            available_fish_voices = fish_provider.get("voices", [])
         combined_fish = []
         seen_voice_ids: set[str] = set()
-        for voice_item in custom_voices_list + (fish_voices or []):
+        for voice_item in available_fish_voices:
             voice_id = str(voice_item.get("id", "")).strip()
             if not voice_id or voice_id in seen_voice_ids:
                 continue
+            setting = voice_settings.get(voice_id, {})
+            if setting.get("hidden"):
+                continue
+            if setting.get("display_name"):
+                voice_item = {**voice_item, "name": setting["display_name"]}
             seen_voice_ids.add(voice_id)
             combined_fish.append(voice_item)
-        for p in providers:
-            if p.get("provider") == "fish-audio":
-                p["voices"] = combined_fish
+        fish_provider["voices"] = combined_fish
 
     return {"providers": providers}
+
+
+@app.patch("/api/projects/{project_id}/voices/{voice_id}")
+async def api_rename_project_voice(
+    project_id: str,
+    voice_id: str,
+    req: ProjectVoiceRename,
+    device_id: str = Depends(get_current_device),
+):
+    _assert_project_owner(project_id, device_id)
+    name = req.name.strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="يرجى إدخال اسم صالح للصوت.")
+    rename_project_voice(project_id, voice_id, name)
+    return {"success": True, "project_id": project_id, "voice_id": voice_id, "name": name}
+
+
+@app.delete("/api/projects/{project_id}/voices/{voice_id}")
+async def api_hide_project_voice(
+    project_id: str,
+    voice_id: str,
+    device_id: str = Depends(get_current_device),
+):
+    _assert_project_owner(project_id, device_id)
+    hide_project_voice(project_id, voice_id)
+    return {"success": True, "project_id": project_id, "voice_id": voice_id}
 
 
 @app.post("/api/voices/clone")

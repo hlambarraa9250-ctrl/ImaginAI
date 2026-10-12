@@ -47,6 +47,17 @@ def init_db() -> None:
             )
         """)
 
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS project_voice_settings (
+                project_id TEXT NOT NULL,
+                voice_id TEXT NOT NULL,
+                display_name TEXT,
+                hidden INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY (project_id, voice_id),
+                FOREIGN KEY (project_id) REFERENCES projects (project_id) ON DELETE CASCADE
+            )
+        """)
+
         # videos table
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS videos (
@@ -135,6 +146,10 @@ def clear_device_data(device_id: str) -> None:
         if project_ids:
             placeholders = ",".join("?" * len(project_ids))
             cursor.execute(f"DELETE FROM videos WHERE project_id IN ({placeholders})", project_ids)
+            cursor.execute(
+                f"DELETE FROM project_voice_settings WHERE project_id IN ({placeholders})",
+                project_ids,
+            )
         
         cursor.execute("DELETE FROM projects WHERE device_id = ?", (device_id,))
         cursor.execute("DELETE FROM devices WHERE device_id = ?", (device_id,))
@@ -195,6 +210,67 @@ def get_project(project_id: str) -> Optional[Dict[str, Any]]:
         cursor.execute("SELECT * FROM projects WHERE project_id = ?", (project_id,))
         row = cursor.fetchone()
         return dict(row) if row else None
+
+
+def rename_project(project_id: str, name: str) -> Optional[Dict[str, Any]]:
+    with get_db_connection() as conn:
+        conn.execute("UPDATE projects SET name = ? WHERE project_id = ?", (name, project_id))
+        conn.commit()
+        row = conn.execute("SELECT * FROM projects WHERE project_id = ?", (project_id,)).fetchone()
+        return dict(row) if row else None
+
+
+def delete_project(project_id: str) -> Optional[Dict[str, Any]]:
+    """Delete one project and its database-owned videos and voice settings."""
+    with get_db_connection() as conn:
+        project_row = conn.execute(
+            "SELECT * FROM projects WHERE project_id = ?", (project_id,)
+        ).fetchone()
+        if not project_row:
+            return None
+        videos = conn.execute(
+            "SELECT * FROM videos WHERE project_id = ?", (project_id,)
+        ).fetchall()
+        conn.execute("DELETE FROM videos WHERE project_id = ?", (project_id,))
+        conn.execute("DELETE FROM project_voice_settings WHERE project_id = ?", (project_id,))
+        conn.execute("DELETE FROM projects WHERE project_id = ?", (project_id,))
+        conn.commit()
+        return {"project": dict(project_row), "videos": [dict(row) for row in videos]}
+
+
+def get_project_voice_settings(project_id: str) -> Dict[str, Dict[str, Any]]:
+    with get_db_connection() as conn:
+        rows = conn.execute(
+            "SELECT voice_id, display_name, hidden FROM project_voice_settings WHERE project_id = ?",
+            (project_id,),
+        ).fetchall()
+        return {str(row["voice_id"]): dict(row) for row in rows}
+
+
+def rename_project_voice(project_id: str, voice_id: str, display_name: str) -> None:
+    with get_db_connection() as conn:
+        conn.execute(
+            """
+            INSERT INTO project_voice_settings (project_id, voice_id, display_name, hidden)
+            VALUES (?, ?, ?, 0)
+            ON CONFLICT(project_id, voice_id) DO UPDATE SET display_name = excluded.display_name
+            """,
+            (project_id, voice_id, display_name),
+        )
+        conn.commit()
+
+
+def hide_project_voice(project_id: str, voice_id: str) -> None:
+    with get_db_connection() as conn:
+        conn.execute(
+            """
+            INSERT INTO project_voice_settings (project_id, voice_id, display_name, hidden)
+            VALUES (?, ?, NULL, 1)
+            ON CONFLICT(project_id, voice_id) DO UPDATE SET hidden = 1
+            """,
+            (project_id, voice_id),
+        )
+        conn.commit()
 
 
 # ── Video Operations ─────────────────────────────────────────────────────────

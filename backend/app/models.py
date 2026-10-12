@@ -21,6 +21,14 @@ class ProjectCreate(BaseModel):
     name: str = Field(..., min_length=1, max_length=200, description="Project name")
 
 
+class ProjectRename(BaseModel):
+    name: str = Field(..., min_length=1, max_length=200)
+
+
+class ProjectVoiceRename(BaseModel):
+    name: str = Field(..., min_length=1, max_length=120)
+
+
 class ProjectResponse(BaseModel):
     """Project entity response."""
     project_id: str

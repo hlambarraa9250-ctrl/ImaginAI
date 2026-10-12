@@ -29,7 +29,9 @@ import {
   Clock,
   Layers,
   ChevronLeft,
+  Pencil,
   RotateCcw,
+  Trash2,
   Subtitles,
   X,
   Check,
@@ -54,6 +56,10 @@ import {
   createProject,
   getProjectVideos,
   getVideoStreamUrl,
+  renameProject,
+  deleteProject,
+  renameProjectVoice,
+  hideProjectVoice,
   getCustomFonts,
   uploadCustomFont,
   getJobReviewData,
@@ -293,7 +299,7 @@ export default function Home() {
     try {
       const result = await cloneVoice(cloneFile, cloneVoiceName.trim());
       // Refresh catalog
-      const catRes = await getVoicesCatalog();
+      const catRes = await getVoicesCatalog(activeProject?.project_id);
       if (catRes.providers) {
         setProvidersCatalog(catRes.providers);
       }
@@ -476,17 +482,29 @@ export default function Home() {
       })
       .catch((e) => console.error("Failed to load niches catalog:", e));
 
-    getVoicesCatalog()
-      .then((data) => {
-        if (data.providers && data.providers.length > 0) {
-          setProvidersCatalog(data.providers);
-        }
-      })
-      .catch((err) => console.log("Using default voice catalog:", err));
-
     fetchAllProjects();
     loadCustomFonts();
   }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    getVoicesCatalog(activeProject?.project_id)
+      .then((data) => {
+        if (cancelled || !data.providers?.length) return;
+        setProvidersCatalog(data.providers);
+      })
+      .catch((err) => console.log("Using default voice catalog:", err));
+    return () => {
+      cancelled = true;
+    };
+  }, [activeProject?.project_id]);
+
+  useEffect(() => {
+    if (selectedProvider !== "fish-audio") return;
+    const fish = providersCatalog.find((provider) => provider.provider === "fish-audio");
+    if (!fish || fish.voices.some((voice) => String(voice.id) === String(selectedVoice))) return;
+    setSelectedVoice(fish.voices[0]?.id ?? "");
+  }, [providersCatalog, selectedProvider, selectedVoice]);
 
   useEffect(() => {
     if (screen === "settings") {
@@ -752,6 +770,75 @@ export default function Home() {
     setActiveProject(proj);
     loadProjectVideos(proj.project_id);
     setScreen("input");
+  };
+
+  const handleRenameProject = async (project: Project) => {
+    const enteredName = window.prompt("اكتب الاسم الجديد للمشروع", project.name);
+    const name = enteredName?.trim();
+    if (!name || name === project.name) return;
+    try {
+      await renameProject(project.project_id, name);
+      setProjectsList((current) =>
+        current.map((item) => item.project_id === project.project_id ? { ...item, name } : item),
+      );
+      setActiveProject((current) =>
+        current?.project_id === project.project_id ? { ...current, name } : current,
+      );
+    } catch (error) {
+      alert(error instanceof Error ? error.message : "تعذرت إعادة تسمية المشروع.");
+    }
+  };
+
+  const handleDeleteProject = async (project: Project) => {
+    const warning = `سيُحذف مشروع "${project.name}" وكل الفيديوهات المسجلة داخله نهائياً. لا يمكن التراجع.`;
+    if (!window.confirm(warning)) return;
+    try {
+      await deleteProject(project.project_id);
+      setProjectsList((current) => current.filter((item) => item.project_id !== project.project_id));
+      if (activeProject?.project_id === project.project_id) {
+        setActiveProject(null);
+        setActiveProjectVideos([]);
+        setScreen("dashboard");
+      }
+      try {
+        localStorage.removeItem(`imaginai_project_niche_${project.project_id}`);
+      } catch {}
+    } catch (error) {
+      alert(error instanceof Error ? error.message : "تعذر حذف المشروع.");
+    }
+  };
+
+  const handleRenameFishVoice = async (voice: VoiceItem) => {
+    if (!activeProject) return;
+    const enteredName = window.prompt("الاسم الذي سيظهر لهذا الصوت في هذا المشروع", voice.name);
+    const name = enteredName?.trim();
+    if (!name || name === voice.name) return;
+    try {
+      await renameProjectVoice(activeProject.project_id, String(voice.id), name);
+      const data = await getVoicesCatalog(activeProject.project_id);
+      if (data.providers?.length) setProvidersCatalog(data.providers);
+    } catch (error) {
+      alert(error instanceof Error ? error.message : "تعذرت إعادة تسمية الصوت.");
+    }
+  };
+
+  const handleHideFishVoice = async (voice: VoiceItem) => {
+    if (!activeProject) return;
+    const warning = `إزالة "${voice.name}" من مشروع "${activeProject.name}" فقط؟ سيبقى الصوت متاحاً في المشاريع الأخرى.`;
+    if (!window.confirm(warning)) return;
+    try {
+      await hideProjectVoice(activeProject.project_id, String(voice.id));
+      const data = await getVoicesCatalog(activeProject.project_id);
+      if (data.providers?.length) {
+        setProvidersCatalog(data.providers);
+        if (selectedProvider === "fish-audio" && selectedVoice === voice.id) {
+          const fish = data.providers.find((provider) => provider.provider === "fish-audio");
+          setSelectedVoice(fish?.voices[0]?.id ?? "");
+        }
+      }
+    } catch (error) {
+      alert(error instanceof Error ? error.message : "تعذر إزالة الصوت من هذا المشروع.");
+    }
   };
 
   const handleProceedToVoice = (e: React.FormEvent) => {
@@ -1081,7 +1168,7 @@ export default function Home() {
                         : "bg-[#121212] border-neutral-800 hover:border-neutral-700 hover:bg-[#171717]"
                     }`}
                   >
-                    <div className="flex items-start justify-between mb-3">
+                    <div className="flex items-start justify-between mb-3 gap-2">
                       <div>
                         <span className="text-[10px] font-bold text-amber-400 bg-amber-500/10 border border-amber-500/20 px-2.5 py-0.5 rounded-full inline-block mb-1.5">
                           النيتش: {proj.niche}
@@ -1090,7 +1177,33 @@ export default function Home() {
                           {proj.name}
                         </h3>
                       </div>
-                      <ChevronLeft className="w-5 h-5 text-neutral-500 group-hover:text-amber-400 transition-colors" />
+                      <div className="flex items-center gap-1 shrink-0">
+                        <button
+                          type="button"
+                          title="إعادة تسمية المشروع"
+                          aria-label={`إعادة تسمية ${proj.name}`}
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            void handleRenameProject(proj);
+                          }}
+                          className="p-2 rounded-lg text-neutral-400 hover:text-amber-300 hover:bg-neutral-800"
+                        >
+                          <Pencil className="w-4 h-4" />
+                        </button>
+                        <button
+                          type="button"
+                          title="حذف المشروع"
+                          aria-label={`حذف ${proj.name}`}
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            void handleDeleteProject(proj);
+                          }}
+                          className="p-2 rounded-lg text-neutral-400 hover:text-red-400 hover:bg-neutral-800"
+                        >
+                          <Trash2 className="w-4 h-4" />
+                        </button>
+                        <ChevronLeft className="w-5 h-5 text-neutral-500 group-hover:text-amber-400 transition-colors" />
+                      </div>
                     </div>
 
                     <div className="flex items-center gap-4 text-xs text-neutral-400 pt-3 border-t border-neutral-800/80">
@@ -1851,6 +1964,12 @@ export default function Home() {
                 </p>
               )}
 
+              {selectedProvider === "fish-audio" && activeProject && (
+                <p className="text-xs text-cyan-200/80">
+                  إعادة التسمية والإزالة تخص مشروع «{activeProject.name}» فقط.
+                </p>
+              )}
+
               {selectedProvider === "fish-audio" && (
                 <button
                   type="button"
@@ -1917,11 +2036,41 @@ export default function Home() {
                         </div>
                       </div>
 
-                      {isSelected && (
-                        <div className="bg-amber-500/20 text-amber-400 p-1 rounded-full border border-amber-500/30">
-                          <CheckCircle2 className="w-4 h-4 text-amber-400" />
-                        </div>
-                      )}
+                      <div className="flex items-center gap-1 shrink-0">
+                        {selectedProvider === "fish-audio" && activeProject && (
+                          <>
+                            <button
+                              type="button"
+                              title="إعادة تسمية الصوت في هذا المشروع فقط"
+                              aria-label={`إعادة تسمية الصوت ${v.name}`}
+                              onClick={(event) => {
+                                event.stopPropagation();
+                                void handleRenameFishVoice(v);
+                              }}
+                              className="p-2 rounded-lg text-neutral-400 hover:text-cyan-300 hover:bg-neutral-800"
+                            >
+                              <Pencil className="w-4 h-4" />
+                            </button>
+                            <button
+                              type="button"
+                              title="إزالة الصوت من هذا المشروع فقط"
+                              aria-label={`إزالة الصوت ${v.name} من هذا المشروع`}
+                              onClick={(event) => {
+                                event.stopPropagation();
+                                void handleHideFishVoice(v);
+                              }}
+                              className="p-2 rounded-lg text-neutral-400 hover:text-red-400 hover:bg-neutral-800"
+                            >
+                              <Trash2 className="w-4 h-4" />
+                            </button>
+                          </>
+                        )}
+                        {isSelected && (
+                          <div className="bg-amber-500/20 text-amber-400 p-1 rounded-full border border-amber-500/30">
+                            <CheckCircle2 className="w-4 h-4 text-amber-400" />
+                          </div>
+                        )}
+                      </div>
                     </div>
 
                     <p className="text-xs text-neutral-400 leading-relaxed">{v.desc}</p>

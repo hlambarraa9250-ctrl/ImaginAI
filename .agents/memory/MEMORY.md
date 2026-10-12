@@ -1,3 +1,4 @@
 - [Next.js workspace dependency layout](next-workspace-dependencies.md) — Keep Turbopack rooted in frontend with dependencies physically inside that root.
 - [Device-scoped API identity](device-scoped-api-identity.md) — Send the device header on every job request and synchronize it with the cookie.
 - [Video-source rights handling](video-source-rights.md) — Treat unknown licenses as unverified and require user review; Coverr stays opt-in.
+- [Project-scoped Fish voices](project-scoped-voice-settings.md) — Voice renames and removals affect only the selected project, never the Fish account or other projects.

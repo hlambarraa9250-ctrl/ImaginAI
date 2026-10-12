@@ -162,9 +162,10 @@ export function getDownloadUrl(jobId: string): string {
   return `${API_BASE}/api/jobs/${jobId}/download`;
 }
 
-export async function getVoicesCatalog(): Promise<{ providers: VoiceProviderCatalog[] }> {
+export async function getVoicesCatalog(projectId?: string): Promise<{ providers: VoiceProviderCatalog[] }> {
   const visitorId = getOrCreateVisitorId();
-  const resp = await fetch(`${API_BASE}/api/voices`, {
+  const query = projectId ? `?project_id=${encodeURIComponent(projectId)}` : "";
+  const resp = await fetch(`${API_BASE}/api/voices${query}`, {
     cache: "no-store",
     credentials: "include",
     headers: {
@@ -231,6 +232,73 @@ export async function createProject(data: { domain: string; niche: string; name:
     throw new Error("Failed to create project");
   }
   return resp.json();
+}
+
+export async function renameProject(projectId: string, name: string): Promise<Project> {
+  const visitorId = getOrCreateVisitorId();
+  const resp = await fetch(`${API_BASE}/api/projects/${encodeURIComponent(projectId)}`, {
+    method: "PATCH",
+    credentials: "include",
+    headers: {
+      "Content-Type": "application/json",
+      "x-visitor-id": visitorId,
+      "x-device-id": visitorId,
+    },
+    body: JSON.stringify({ name }),
+  });
+  if (!resp.ok) throw new Error("تعذر إعادة تسمية المشروع.");
+  return resp.json();
+}
+
+export async function deleteProject(projectId: string): Promise<{ success: boolean; deleted_videos: number }> {
+  const visitorId = getOrCreateVisitorId();
+  const resp = await fetch(`${API_BASE}/api/projects/${encodeURIComponent(projectId)}`, {
+    method: "DELETE",
+    credentials: "include",
+    headers: {
+      "x-visitor-id": visitorId,
+      "x-device-id": visitorId,
+    },
+  });
+  if (!resp.ok) {
+    const data = await resp.json().catch(() => ({}));
+    throw new Error(data.detail || "تعذر حذف المشروع.");
+  }
+  return resp.json();
+}
+
+export async function renameProjectVoice(projectId: string, voiceId: string, name: string): Promise<void> {
+  const visitorId = getOrCreateVisitorId();
+  const resp = await fetch(
+    `${API_BASE}/api/projects/${encodeURIComponent(projectId)}/voices/${encodeURIComponent(voiceId)}`,
+    {
+      method: "PATCH",
+      credentials: "include",
+      headers: {
+        "Content-Type": "application/json",
+        "x-visitor-id": visitorId,
+        "x-device-id": visitorId,
+      },
+      body: JSON.stringify({ name }),
+    },
+  );
+  if (!resp.ok) throw new Error("تعذرت إعادة تسمية الصوت في هذا المشروع.");
+}
+
+export async function hideProjectVoice(projectId: string, voiceId: string): Promise<void> {
+  const visitorId = getOrCreateVisitorId();
+  const resp = await fetch(
+    `${API_BASE}/api/projects/${encodeURIComponent(projectId)}/voices/${encodeURIComponent(voiceId)}`,
+    {
+      method: "DELETE",
+      credentials: "include",
+      headers: {
+        "x-visitor-id": visitorId,
+        "x-device-id": visitorId,
+      },
+    },
+  );
+  if (!resp.ok) throw new Error("تعذر إخفاء الصوت من هذا المشروع.");
 }
 
 export async function getProjectVideos(projectId: string): Promise<{ project: Project; videos: VideoItem[] }> {
