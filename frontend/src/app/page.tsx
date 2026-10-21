@@ -2158,13 +2158,15 @@ export default function Home() {
         {screen === "progress" && (
           <div className="w-full max-w-md animate-in fade-in zoom-in-95 duration-500 text-center">
             <div className="bg-[#121212] border border-neutral-800 rounded-2xl p-8 shadow-2xl flex flex-col items-center">
-              {errorMsg ? (
+              {errorMsg && (statusData?.status === "failed" || errorMsg.startsWith("لم يعثر")) ? (
                 <AlertCircle className="w-12 h-12 text-rose-400 mb-4" />
               ) : (
                 <Loader2 className="w-12 h-12 text-amber-400 animate-spin mb-4" />
               )}
               <h2 className="text-xl font-bold text-white mb-1">
-                {errorMsg ? "توقفت معالجة الفيديو" : "جاري إنشاء وتجميع الفيديو..."}
+                {errorMsg && (statusData?.status === "failed" || errorMsg.startsWith("لم يعثر"))
+                  ? "توقفت معالجة الفيديو"
+                  : "جاري إنشاء وتجميع الفيديو..."}
               </h2>
               <p className="text-xs text-neutral-400 mb-6">
                 {errorMsg ? "تحقق من الرسالة أدناه قبل بدء محاولة جديدة." : "قد تستغرق هذه العملية دقيقة إلى دقيقتين حسب طول الفيديو"}

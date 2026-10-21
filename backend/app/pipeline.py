@@ -336,6 +336,9 @@ async def run_pipeline(
                 "shots": shots_data,
             })
 
+        if _review_has_duplicate_footage(review_scenes):
+            raise RuntimeError("تم اكتشاف لقطة مكررة قبل المراجعة النهائية؛ أوقفنا التوليد لمنع تكرار المشاهد.")
+
         review_payload = {
             "job_id": job_id,
             "idea": idea,
