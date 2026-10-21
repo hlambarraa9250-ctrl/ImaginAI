@@ -92,6 +92,13 @@ export interface JobStatusResponse {
 // service. An override is retained for local split-server development only.
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL || "";
 
+export class ApiError extends Error {
+  constructor(message: string, public readonly status: number) {
+    super(message);
+    this.name = "ApiError";
+  }
+}
+
 function getOrCreateVisitorId(): string {
   if (typeof window === "undefined") return "server_ssr";
   let vid = localStorage.getItem("imaginai_visitor_id");
@@ -153,7 +160,11 @@ export async function getJobStatus(jobId: string): Promise<JobStatusResponse> {
     },
   });
   if (!resp.ok) {
-    throw new Error(`Failed to fetch job status: ${resp.statusText}`);
+    const body = await resp.json().catch(() => null);
+    throw new ApiError(
+      typeof body?.detail === "string" ? body.detail : `تعذر جلب حالة المهمة (${resp.status}).`,
+      resp.status,
+    );
   }
   return resp.json();
 }

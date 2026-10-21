@@ -44,6 +44,7 @@ import {
   Wand2
 } from "lucide-react";
 import { 
+  ApiError,
   createJob, 
   getJobStatus, 
   getDownloadUrl, 
@@ -210,6 +211,7 @@ export default function Home() {
   const [statusData, setStatusData] = useState<JobStatusResponse | null>(null);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const pollingInterval = useRef<NodeJS.Timeout | null>(null);
+  const pollingFailures = useRef(0);
   const generationLock = useRef(false);
 
   // Section Approval Modal State (Dynamic Analysis)
@@ -534,10 +536,13 @@ export default function Home() {
   // ── Poll Job Status ──────────────────────────────────────────────────────
   const startPolling = (id: string) => {
     if (pollingInterval.current) clearInterval(pollingInterval.current);
+    pollingFailures.current = 0;
     
     pollingInterval.current = setInterval(async () => {
       try {
         const data = await getJobStatus(id);
+        pollingFailures.current = 0;
+        setErrorMsg(null);
         setStatusData(data);
         
         if (data.status === "pending_section_approval") {
@@ -548,6 +553,7 @@ export default function Home() {
             const rev = await getJobReviewData(id);
             setReviewData(rev);
             setLicenseReviewConfirmed(false);
+            setReviewError(data.error || null);
             const initialMap: Record<number, string> = {};
             rev.scenes.forEach((s) => {
               initialMap[s.scene_index] = s.narration;
@@ -556,7 +562,7 @@ export default function Home() {
             setScreen("review");
             if (pollingInterval.current) clearInterval(pollingInterval.current);
           } catch (err) {
-            console.error("Failed to load review data:", err);
+            setReviewError(err instanceof Error ? err.message : "تعذر تحميل مراجعة اللقطات.");
           }
         } else if (data.status === "done") {
           setScreen("result");
@@ -604,14 +610,43 @@ export default function Home() {
             }
           }
         } else if (data.status === "failed") {
-          setErrorMsg(data.error || "حدث خطأ غير متوقع أثناء معالجة الفيديو.");
           generationLock.current = false;
-          if (typeof window !== "undefined") localStorage.removeItem("imaginai_active_job");
-          setScreen("voice");
           if (pollingInterval.current) clearInterval(pollingInterval.current);
+          const canRetryRender =
+            data.stages?.footage === "done" &&
+            (data.stages?.render === "processing" || data.stages?.render === "failed");
+          if (canRetryRender) {
+            try {
+              const rev = await getJobReviewData(id);
+              setReviewData(rev);
+              setEditedScenesMap(Object.fromEntries(rev.scenes.map((scene) => [scene.scene_index, scene.narration])));
+              setLicenseReviewConfirmed(false);
+              setReviewError(data.error || "توقف الرندر، لكن المشاهد واللقطات محفوظة ويمكن إعادة المحاولة.");
+              setScreen("review");
+            } catch {
+              setErrorMsg(data.error || "تعذر استعادة مراجعة الفيديو.");
+              setScreen("progress");
+            }
+          } else {
+            if (typeof window !== "undefined") localStorage.removeItem("imaginai_active_job");
+            setErrorMsg(data.error || "حدث خطأ غير متوقع أثناء معالجة الفيديو.");
+            setScreen("progress");
+          }
         }
       } catch (err: any) {
-        console.error("Polling error:", err);
+        if (err instanceof ApiError && err.status === 404) {
+          if (pollingInterval.current) clearInterval(pollingInterval.current);
+          generationLock.current = false;
+          if (typeof window !== "undefined") localStorage.removeItem("imaginai_active_job");
+          setStatusData(null);
+          setErrorMsg("لم يعثر الخادم على مهمة الفيديو. يمكنك بدء محاولة جديدة.");
+          setScreen("progress");
+          return;
+        }
+        pollingFailures.current += 1;
+        if (pollingFailures.current >= 3) {
+          setErrorMsg("انقطع الاتصال بالخادم مؤقتاً. ما زالت المحاولة محفوظة وسيستمر التحقق تلقائياً.");
+        }
       }
     }, 3000);
   };
@@ -630,6 +665,7 @@ export default function Home() {
           const rev = await getJobReviewData(savedJobId);
           setReviewData(rev);
           setEditedScenesMap(Object.fromEntries(rev.scenes.map((s) => [s.scene_index, s.narration])));
+          setReviewError(data.error || null);
           setScreen("review");
         } else if (data.status === "pending_section_approval") {
           setSectionApprovalData((data as any).section_proposal || true);
@@ -638,18 +674,34 @@ export default function Home() {
           generationLock.current = false;
           setScreen("result");
         } else if (data.status === "failed") {
-          localStorage.removeItem("imaginai_active_job");
           generationLock.current = false;
-          setErrorMsg(data.error || "توقفت عملية التوليد.");
-          setScreen("voice");
+          const canRetryRender =
+            data.stages?.footage === "done" &&
+            (data.stages?.render === "processing" || data.stages?.render === "failed");
+          if (canRetryRender) {
+            const rev = await getJobReviewData(savedJobId);
+            setReviewData(rev);
+            setEditedScenesMap(Object.fromEntries(rev.scenes.map((scene) => [scene.scene_index, scene.narration])));
+            setLicenseReviewConfirmed(false);
+            setReviewError(data.error || "توقف الرندر، لكن المشاهد واللقطات محفوظة ويمكن إعادة المحاولة.");
+            setScreen("review");
+          } else {
+            localStorage.removeItem("imaginai_active_job");
+            setErrorMsg(data.error || "توقفت عملية التوليد.");
+            setScreen("progress");
+          }
         } else {
           generationLock.current = true;
           setScreen("progress");
           startPolling(savedJobId);
         }
       })
-      .catch(() => {
+      .catch((err) => {
         localStorage.removeItem("imaginai_active_job");
+        setErrorMsg(err instanceof ApiError && err.status === 404
+          ? "لم يعثر الخادم على مهمة الفيديو. يمكنك بدء محاولة جديدة."
+          : "تعذر استعادة الاتصال بمهمة الفيديو.");
+        setScreen("progress");
       });
   }, []);
 
@@ -670,6 +722,7 @@ export default function Home() {
         narration: editedScenesMap[sc.scene_index] ?? sc.narration,
       }));
       await resumeJob(statusData.job_id, payload, licenseReviewConfirmed);
+      setErrorMsg(null);
       setScreen("progress");
       startPolling(statusData.job_id);
     } catch (err: any) {
@@ -1005,6 +1058,10 @@ export default function Home() {
     setJobId(null);
     setStatusData(null);
     setErrorMsg(null);
+    if (typeof window !== "undefined") {
+      localStorage.removeItem("imaginai_active_job");
+      localStorage.removeItem("imaginai_active_job_pending");
+    }
     setScreen("input");
   };
 
@@ -2101,9 +2158,17 @@ export default function Home() {
         {screen === "progress" && (
           <div className="w-full max-w-md animate-in fade-in zoom-in-95 duration-500 text-center">
             <div className="bg-[#121212] border border-neutral-800 rounded-2xl p-8 shadow-2xl flex flex-col items-center">
-              <Loader2 className="w-12 h-12 text-amber-400 animate-spin mb-4" />
-              <h2 className="text-xl font-bold text-white mb-1">جاري إنشاء وتجميع الفيديو...</h2>
-              <p className="text-xs text-neutral-400 mb-6">قد تستغرق هذه العملية دقيقة إلى دقيقتين حسب طول الفيديو</p>
+              {errorMsg ? (
+                <AlertCircle className="w-12 h-12 text-rose-400 mb-4" />
+              ) : (
+                <Loader2 className="w-12 h-12 text-amber-400 animate-spin mb-4" />
+              )}
+              <h2 className="text-xl font-bold text-white mb-1">
+                {errorMsg ? "توقفت معالجة الفيديو" : "جاري إنشاء وتجميع الفيديو..."}
+              </h2>
+              <p className="text-xs text-neutral-400 mb-6">
+                {errorMsg ? "تحقق من الرسالة أدناه قبل بدء محاولة جديدة." : "قد تستغرق هذه العملية دقيقة إلى دقيقتين حسب طول الفيديو"}
+              </p>
 
               {/* Stage Stepper */}
               <div className="w-full space-y-3 mb-6 text-right">
@@ -2145,6 +2210,15 @@ export default function Home() {
                   <p>{errorMsg}</p>
                 </div>
               )}
+              {errorMsg && (statusData?.status === "failed" || errorMsg.startsWith("لم يعثر")) && (
+                <button
+                  type="button"
+                  onClick={handleReset}
+                  className="px-5 py-2.5 rounded-xl bg-amber-500 text-black text-sm font-bold hover:bg-amber-400"
+                >
+                  العودة وبدء محاولة جديدة
+                </button>
+              )}
             </div>
           </div>
         )}
@@ -2177,6 +2251,11 @@ export default function Home() {
                       />
                       <span>راجعت مصادر اللقطات وأؤكد المتابعة بعد التحقق من صلاحية استخدامها.</span>
                     </label>
+                  </div>
+                )}
+                {statusData?.error && (
+                  <div className="mt-4 rounded-xl border border-amber-500/40 bg-amber-500/10 p-3 text-xs text-amber-100">
+                    {statusData.error}
                   </div>
                 )}
               </div>
@@ -2308,7 +2387,11 @@ export default function Home() {
                   ) : (
                     <>
                       <Zap className="w-4 h-4 fill-current" />
-                      <span>اعتماد التعديلات ورندر الفيديو النهائي 🚀</span>
+                      <span>
+                        {statusData?.status === "failed" || statusData?.error?.includes("توقف الرندر")
+                          ? "إعادة محاولة الرندر النهائي"
+                          : "اعتماد التعديلات ورندر الفيديو النهائي 🚀"}
+                      </span>
                     </>
                   )}
                 </button>

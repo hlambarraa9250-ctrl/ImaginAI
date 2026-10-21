@@ -84,14 +84,30 @@ async def lifespan(app: FastAPI):
         try:
             status = json.loads(status_path.read_text(encoding="utf-8"))
             if status.get("status") in {"pending", "processing"}:
-                status.update({
-                    "status": "failed",
-                    "current_stage": None,
-                    "error": "توقفت عملية التوليد بسبب إعادة تشغيل الخادم. يرجى بدء توليد جديد.",
-                })
+                stages = status.get("stages", {})
+                can_resume_render = (
+                    status.get("status") == "processing"
+                    and status.get("current_stage") in {"captions", "render"}
+                    and stages.get("footage") == "done"
+                    and (job_path / "review_data.json").is_file()
+                )
+                if can_resume_render:
+                    status.update({
+                        "status": "pending_review",
+                        "current_stage": "pending_review",
+                        "error": "توقف الرندر بعد إعادة تشغيل الخادم. اللقطات محفوظة ويمكنك مراجعتها ثم إعادة المحاولة.",
+                    })
+                    from app.db import update_video
+                    update_video(video_id=job_path.name, status="pending_review")
+                else:
+                    status.update({
+                        "status": "failed",
+                        "current_stage": None,
+                        "error": "توقفت عملية التوليد بسبب إعادة تشغيل الخادم. يرجى بدء توليد جديد.",
+                    })
+                    from app.db import update_video
+                    update_video(video_id=job_path.name, status="failed")
                 status_path.write_text(json.dumps(status, ensure_ascii=False, indent=2), encoding="utf-8")
-                from app.db import update_video
-                update_video(video_id=job_path.name, status="failed")
         except Exception:
             continue
     yield
@@ -1008,10 +1024,16 @@ async def resume_job_endpoint(
         raise HTTPException(status_code=404, detail="الـ Job غير موجود.")
     
     st = json.loads(status_file.read_text(encoding="utf-8"))
-    if st.get("status") != "pending_review":
+    review_file = _job_dir(job_id) / "review_data.json"
+    recoverable_render_failure = (
+        st.get("status") == "failed"
+        and st.get("stages", {}).get("footage") == "done"
+        and st.get("stages", {}).get("render") in {"processing", "failed"}
+        and review_file.is_file()
+    )
+    if st.get("status") != "pending_review" and not recoverable_render_failure:
         raise HTTPException(status_code=400, detail="الـ Job ليس في حالة انتظار المراجعة (pending_review).")
 
-    review_file = _job_dir(job_id) / "review_data.json"
     try:
         review_data = json.loads(review_file.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
@@ -1030,6 +1052,8 @@ async def resume_job_endpoint(
     st["status"] = "processing"
     st["current_stage"] = "captions"
     st["stages"]["captions"] = "processing"
+    st["stages"]["render"] = "pending"
+    st["error"] = None
     status_file.write_text(json.dumps(st, ensure_ascii=False, indent=2), encoding="utf-8")
 
     from app.db import update_video
