@@ -1,7 +1,6 @@
 import json
 import uuid
 import shutil
-import httpx
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
@@ -66,6 +65,7 @@ from app.db import (
     get_custom_font_by_id,
 )
 from app.services.rate_limit import check_and_increment_rate_limits, DATA_DIR
+from app.services.http_client import create_outbound_client
 
 from contextlib import asynccontextmanager
 
@@ -867,7 +867,7 @@ async def test_video_source(source_id: str, device_id: str = Depends(get_current
     }
     url, params, accepts_response = checks[source_id]
     try:
-        async with httpx.AsyncClient(timeout=12) as client:
+        async with create_outbound_client(timeout=12) as client:
             response = await client.get(url, params=params)
             response.raise_for_status()
             if not accepts_response(response.json()):

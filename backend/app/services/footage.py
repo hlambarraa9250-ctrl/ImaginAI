@@ -28,6 +28,7 @@ from app.config import (
     STYLE_MAX_SHOT_DURATION,
 )
 from app.models import ScriptScene
+from app.services.http_client import create_outbound_client
 
 
 # ── Pixabay cache (24h requirement) ─────────────────────────────────────────
@@ -969,7 +970,7 @@ async def search_video_sources(
         "pixabay_video", "pexels_video", "pixabay_image", "pexels_image",
     ]
     output = []
-    async with httpx.AsyncClient(timeout=18) as client:
+    async with create_outbound_client(timeout=18) as client:
         for source_id in selected:
             searcher = searchers.get(source_id)
             if not searcher:
@@ -1122,7 +1123,7 @@ async def fetch_all_footage(
             resolved_priority = [item.strip() for item in niche_info.get("sources", "").split(",") if item.strip()]
             niche_context = str(niche_info.get("title") or niche_id)
 
-    async with httpx.AsyncClient() as client:
+    async with create_outbound_client() as client:
         for scene_idx, scene in enumerate(scenes):
             scene_duration = audio_durations[scene_idx]
             # Calculate how many shots needed for this scene

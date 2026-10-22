@@ -12,6 +12,7 @@ from typing import Any
 import httpx
 
 from app.config import GEMINI_TEXT_MODEL
+from app.services.http_client import create_outbound_client
 
 
 def _classify(status_code: int) -> str:
@@ -30,7 +31,7 @@ def _result(status: str, message: str = "") -> dict[str, Any]:
 
 async def _test_http(url: str, headers: dict[str, str], params: dict[str, str] | None = None) -> dict[str, Any]:
     try:
-        async with httpx.AsyncClient(timeout=12.0) as client:
+        async with create_outbound_client(timeout=12.0) as client:
             response = await client.get(url, headers=headers, params=params)
         if 200 <= response.status_code < 300:
             return _result("valid", "Provider accepted the key.")
