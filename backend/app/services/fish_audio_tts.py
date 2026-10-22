@@ -4,6 +4,7 @@ Integrates with Fish Audio API (https://api.fish.audio) for voice listing and te
 """
 
 import os
+import ssl
 import tempfile
 import subprocess
 import json
@@ -13,6 +14,11 @@ from app.config import get_fish_audio_key
 from app.services.gemini_tts import _clean_text, _convert_to_wav, _save_wav, get_audio_duration_ffprobe
 
 FISH_AUDIO_BASE_URL = "https://api.fish.audio/v1"
+
+
+def _fish_ssl_context() -> ssl.SSLContext:
+    """Use the runtime's trusted CA store, including Replit's local issuer CA."""
+    return ssl.create_default_context()
 
 
 def fetch_fish_audio_voices(device_id: str | None = None) -> list[dict]:
@@ -39,7 +45,7 @@ def fetch_fish_audio_voices(device_id: str | None = None) -> list[dict]:
         endpoints.append("https://api.fish.audio/model?page_size=50&self=true")
     endpoints.append("https://api.fish.audio/model?page_size=50")
 
-    with httpx.Client(timeout=15.0) as client:
+    with httpx.Client(timeout=15.0, verify=_fish_ssl_context()) as client:
         for url in endpoints:
             try:
                 resp = client.get(url, headers=headers)
@@ -124,7 +130,7 @@ async def generate_speech_fish_audio(
     if voice_id and voice_id != "default":
         payload["reference_id"] = voice_id
 
-    async with httpx.AsyncClient(timeout=45.0) as client:
+    async with httpx.AsyncClient(timeout=45.0, verify=_fish_ssl_context()) as client:
         response = await client.post(
             f"{FISH_AUDIO_BASE_URL}/tts",
             json=payload,
@@ -206,7 +212,7 @@ async def clone_voice_fish_audio(
         "visibility": "private",
     }
 
-    async with httpx.AsyncClient(timeout=60.0) as client:
+    async with httpx.AsyncClient(timeout=60.0, verify=_fish_ssl_context()) as client:
         response = await client.post(
             "https://api.fish.audio/model",
             data=data,

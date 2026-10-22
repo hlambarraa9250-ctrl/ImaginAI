@@ -3,3 +3,4 @@
 - [Video-source rights handling](video-source-rights.md) — Treat unknown licenses as unverified and require user review; Coverr stays opt-in.
 - [Project-scoped Fish voices](project-scoped-voice-settings.md) — Voice renames and removals affect only the selected project, never the Fish account or other projects.
 - [Unique footage per video](unique-footage.md) — Never reuse one source asset in multiple shots; replace duplicates and ask for review before final rendering.
+- [Replit outbound TLS trust](fish-audio-tls.md) — Fish Audio HTTPX clients need Python's system CA context to trust Replit's local issuer certificate.
