@@ -213,6 +213,7 @@ export default function Home() {
   const pollingInterval = useRef<NodeJS.Timeout | null>(null);
   const pollingFailures = useRef(0);
   const generationLock = useRef(false);
+  const [isStartingGeneration, setIsStartingGeneration] = useState(false);
 
   // Section Approval Modal State (Dynamic Analysis)
   const [sectionApprovalData, setSectionApprovalData] = useState<any>(null);
@@ -910,8 +911,10 @@ export default function Home() {
 
     setErrorMsg(null);
     setStatusData(null);
+    setJobId(null);
     setScreen("progress");
     generationLock.current = true;
+    setIsStartingGeneration(true);
     const idempotencyKey = `generate_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
     if (typeof window !== "undefined") localStorage.setItem("imaginai_active_job_pending", idempotencyKey);
 
@@ -942,6 +945,7 @@ export default function Home() {
         provided_script: inputMode === "script_provided" ? providedScript.trim() : undefined,
         additional_context: inputMode === "ai_generated" && additionalContext.trim() ? additionalContext.trim() : undefined,
       }, idempotencyKey);
+      setIsStartingGeneration(false);
       setJobId(res.job_id);
       if (typeof window !== "undefined") {
         localStorage.setItem("imaginai_active_job", res.job_id);
@@ -951,8 +955,8 @@ export default function Home() {
     } catch (err: any) {
       setErrorMsg(err.message || "حدث خطأ أثناء بدء عملية توليد الفيديو. يرجى التأكد من الموديل المختار والخدمة.");
       generationLock.current = false;
+      setIsStartingGeneration(false);
       if (typeof window !== "undefined") localStorage.removeItem("imaginai_active_job_pending");
-      setScreen("voice");
     }
   };
 
@@ -1973,6 +1977,20 @@ export default function Home() {
               </button>
             </div>
 
+            {errorMsg && (
+              <div
+                role="alert"
+                aria-live="polite"
+                className="mb-5 rounded-xl border border-rose-800 bg-rose-950/30 p-4 text-right text-sm text-rose-200"
+              >
+                <div className="mb-1 flex items-center gap-2 font-bold">
+                  <AlertCircle className="h-4 w-4 shrink-0 text-rose-400" />
+                  <span>تعذر بدء إنشاء الفيديو</span>
+                </div>
+                <p>{errorMsg}</p>
+              </div>
+            )}
+
             {/* Segmented Control Provider Tabs */}
             <div className="bg-[#121212] p-1.5 rounded-2xl border border-neutral-800 flex items-center gap-2 mb-6 shadow-inner">
               {providersCatalog.map((prov, idx) => {
@@ -2146,9 +2164,18 @@ export default function Home() {
               </button>
               <button
                 onClick={handleStartGeneration}
-                className="px-8 py-3.5 rounded-xl bg-gradient-to-r from-amber-500 to-rose-500 text-black font-extrabold text-sm hover:opacity-90 transition-all shadow-lg shadow-amber-500/20 flex items-center gap-2"
+                disabled={isStartingGeneration}
+                aria-busy={isStartingGeneration}
+                className="px-8 py-3.5 rounded-xl bg-gradient-to-r from-amber-500 to-rose-500 text-black font-extrabold text-sm hover:opacity-90 disabled:cursor-wait disabled:opacity-70 transition-all shadow-lg shadow-amber-500/20 flex items-center gap-2"
               >
-                <span>بدء إنشاء ورندر الفيديو 🎬</span>
+                {isStartingGeneration ? (
+                  <>
+                    <Loader2 className="h-4 w-4 animate-spin" />
+                    <span>جارٍ بدء الطلب...</span>
+                  </>
+                ) : (
+                  <span>بدء إنشاء ورندر الفيديو 🎬</span>
+                )}
               </button>
             </div>
           </div>
@@ -2158,14 +2185,14 @@ export default function Home() {
         {screen === "progress" && (
           <div className="w-full max-w-md animate-in fade-in zoom-in-95 duration-500 text-center">
             <div className="bg-[#121212] border border-neutral-800 rounded-2xl p-8 shadow-2xl flex flex-col items-center">
-              {errorMsg && (statusData?.status === "failed" || errorMsg.startsWith("لم يعثر")) ? (
+              {errorMsg ? (
                 <AlertCircle className="w-12 h-12 text-rose-400 mb-4" />
               ) : (
                 <Loader2 className="w-12 h-12 text-amber-400 animate-spin mb-4" />
               )}
               <h2 className="text-xl font-bold text-white mb-1">
-                {errorMsg && (statusData?.status === "failed" || errorMsg.startsWith("لم يعثر"))
-                  ? "توقفت معالجة الفيديو"
+                {errorMsg
+                  ? jobId ? "توقفت معالجة الفيديو" : "تعذر بدء طلب الفيديو"
                   : "جاري إنشاء وتجميع الفيديو..."}
               </h2>
               <p className="text-xs text-neutral-400 mb-6">
@@ -2212,13 +2239,16 @@ export default function Home() {
                   <p>{errorMsg}</p>
                 </div>
               )}
-              {errorMsg && (statusData?.status === "failed" || errorMsg.startsWith("لم يعثر")) && (
+              {errorMsg && (
                 <button
                   type="button"
-                  onClick={handleReset}
+                  onClick={() => {
+                    if (jobId) handleReset();
+                    else setScreen("voice");
+                  }}
                   className="px-5 py-2.5 rounded-xl bg-amber-500 text-black text-sm font-bold hover:bg-amber-400"
                 >
-                  العودة وبدء محاولة جديدة
+                  {jobId ? "العودة وبدء محاولة جديدة" : "العودة للصوت مع الاحتفاظ بالنص"}
                 </button>
               )}
             </div>
