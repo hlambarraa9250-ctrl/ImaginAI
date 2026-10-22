@@ -1,6 +1,6 @@
 """
-imaginAI — Stage 3: Stock Footage Retrieval
-Searches Pexels (primary) then Pixabay (fallback) for video clips.
+imaginAI — Stage 3: Footage Retrieval
+Prioritizes archival/public media before stock providers.
 Downloads locally — no hotlinking.
 Filters for horizontal videos (orientation=landscape/horizontal) and validates
 dimensions via ffprobe after download (rejecting vertical height > width).
@@ -432,20 +432,21 @@ _GENERIC_VISUAL_TERMS = {
 _SEARCH_STOPWORDS = {
     "about", "after", "again", "against", "along", "also", "among", "and",
     "any", "are", "around", "because", "been", "before", "being", "between",
-    "both", "but", "can", "could", "did", "does", "during", "each", "even",
-    "every", "from", "further", "had", "has", "have", "here", "hers", "him",
-    "his", "how", "into", "its", "just", "like", "many", "might", "more",
-    "most", "much", "must", "near", "not", "now", "only", "other", "our",
-    "out", "over", "own", "same", "she", "should", "since", "some", "such",
-    "than", "that", "the", "their", "them", "then", "there", "these", "they",
-    "this", "those", "through", "under", "until", "very", "was", "were",
-    "what", "when", "where", "which", "while", "who", "will", "with", "would",
-    "you", "your", "من", "إلى", "على", "في", "عن", "هذا", "هذه", "ذلك",
-    "التي", "الذي", "كان", "كانت", "هو", "هي", "ثم", "كما", "لكن",
+    "both", "built", "but", "can", "could", "did", "does", "during", "each",
+    "even", "every", "from", "further", "had", "has", "have", "here", "hers",
+    "him", "his", "how", "into", "its", "just", "like", "many", "might",
+    "more", "most", "much", "must", "near", "not", "now", "only", "other",
+    "our", "out", "over", "own", "same", "she", "should", "since", "some",
+    "such", "than", "that", "the", "their", "them", "then", "there", "these",
+    "they", "this", "those", "through", "under", "until", "very", "was",
+    "were", "what", "when", "where", "which", "while", "who", "will", "with",
+    "would", "you", "your", "right", "twenty-five", "billion", "million",
+    "thousand", "hundred", "من", "إلى", "على", "في", "عن", "هذا", "هذه",
+    "ذلك", "التي", "الذي", "كان", "كانت", "هو", "هي", "ثم", "كما", "لكن",
 }
 
 
-def _scene_search_keywords(scene: ScriptScene) -> list[str]:
+def _scene_search_keywords(scene: ScriptScene, niche_context: str | None = None) -> list[str]:
     supplied = []
     for keyword in scene.visual_keywords:
         cleaned = str(keyword).strip()
@@ -455,8 +456,23 @@ def _scene_search_keywords(scene: ScriptScene) -> list[str]:
         return supplied[:5]
 
     narration_terms = re.findall(r"[A-Za-z][A-Za-z'-]{3,}|[\u0600-\u06FF]{4,}", scene.narration.lower())
-    extracted = []
+    counts: dict[str, int] = {}
+    first_seen: dict[str, int] = {}
     for term in narration_terms:
+        normalized = term.strip("'-")
+        if (
+            len(normalized) >= 4
+            and normalized not in _SEARCH_STOPWORDS
+            and normalized not in _GENERIC_VISUAL_TERMS
+        ):
+            counts[normalized] = counts.get(normalized, 0) + 1
+            first_seen.setdefault(normalized, len(first_seen))
+    extracted = sorted(counts, key=lambda term: (-counts[term], first_seen[term]))[:4]
+
+    # Keep niche terms as useful fallbacks, but let repeated story-specific
+    # entities (for example, Voyager and heliosphere) lead the search.
+    context_terms = re.findall(r"[A-Za-z][A-Za-z'-]{3,}|[\u0600-\u06FF]{4,}", (niche_context or "").lower())
+    for term in context_terms:
         normalized = term.strip("'-")
         if (
             len(normalized) >= 4
@@ -465,9 +481,18 @@ def _scene_search_keywords(scene: ScriptScene) -> list[str]:
             and normalized not in extracted
         ):
             extracted.append(normalized)
-        if len(extracted) == 5:
+        if len(extracted) >= 5:
             break
-    return extracted or ["documentary", "stock footage"]
+    return extracted or ["space", "science"]
+
+
+def _prioritize_sources(sources: list[str]) -> list[str]:
+    """Try configured public/archive sources before commercial stock providers."""
+    stock_sources = {"pexels_video", "pixabay_video", "pexels_image", "pixabay_image"}
+    unique_sources = list(dict.fromkeys(sources))
+    return [source for source in unique_sources if source not in stock_sources] + [
+        source for source in unique_sources if source in stock_sources
+    ]
 
 
 async def _search_coverr(
@@ -987,10 +1012,13 @@ async def fetch_footage_for_shot(
         "nasa": lambda page=1: _search_nasa(keywords, client),
         "nasa_apod": lambda page=1: _search_nasa_apod(client, device_id),
     }
-    priority = source_priority or [
+    priority = list(source_priority or [
         "archive_org", "loc", "wikimedia", "nasa", "nara",
         "pixabay_video", "pexels_video", "pixabay_image", "pexels_image",
-    ]
+    ])
+    # Preserve the user's ordering among archival/public sources, while using
+    # commercial stock providers only after those sources have been tried.
+    priority = _prioritize_sources(priority)
     chosen = None
     final_output_path = output_path
     attempts_made = 0
@@ -1086,11 +1114,13 @@ async def fetch_all_footage(
     all_scene_shots: list[list[str]] = []
     used_urls: set[str] = set()
     resolved_priority = source_priority
+    niche_context = niche_id or ""
     if resolved_priority is None and niche_id:
         from app.niches import find_niche_info
         niche_info = find_niche_info(niche_id)
         if niche_info:
             resolved_priority = [item.strip() for item in niche_info.get("sources", "").split(",") if item.strip()]
+            niche_context = str(niche_info.get("title") or niche_id)
 
     async with httpx.AsyncClient() as client:
         for scene_idx, scene in enumerate(scenes):
@@ -1110,7 +1140,7 @@ async def fetch_all_footage(
                 attr = str(clips_dir / f"scene_{scene_idx}_shot_{shot_idx}_attr.json")
 
                 # Keyword variations per shot for variety
-                kw = _scene_search_keywords(scene)
+                kw = _scene_search_keywords(scene, niche_context)
                 if shot_idx > 0 and len(kw) > 1:
                     # Rotate or modify keywords slightly for different shots
                     kw = kw[shot_idx % len(kw):] + kw[:shot_idx % len(kw)]
