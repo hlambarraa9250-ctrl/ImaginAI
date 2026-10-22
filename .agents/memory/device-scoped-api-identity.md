@@ -7,4 +7,4 @@ Every device-scoped job request, including status polling, must send the same cl
 
 **Why:** Proxied browser requests can omit or carry a stale cookie. If polling relies on the cookie alone, a valid job is treated as belonging to another device and returns 404.
 
-**How to apply:** Use one browser-stored device identifier for create, status, review, resume, project, and settings requests, while retaining server-side ownership checks.
+**How to apply:** Use one browser-stored device identifier for create, status, review, resume, project, and settings requests, while retaining server-side ownership checks. Clearing browser storage can create a new identity; device-owned keys and voices remain attached to the prior identity and should only be migrated with the user's explicit approval, preserving the originals.
