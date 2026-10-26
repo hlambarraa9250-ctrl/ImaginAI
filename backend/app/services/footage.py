@@ -447,6 +447,145 @@ _SEARCH_STOPWORDS = {
 }
 
 
+_REJECTED_CANDIDATE_TERMS = {
+    "diagram",
+    "chart",
+    "infographic",
+    "poster",
+    "screenshot",
+    "logo",
+    "collage",
+}
+_MIN_IMAGE_WIDTH = 1600
+_PREFERRED_IMAGE_WIDTH = 1920
+_MIN_VIDEO_WIDTH = 1280
+_MIN_VIDEO_HEIGHT = 720
+_MIN_RELEVANCE_SCORE = 1.5
+
+
+def _simple_stem(token: str) -> str:
+    value = token.strip().lower()
+    for suffix in ("ing", "ers", "ies", "ied", "ed", "es", "s"):
+        if len(value) > 4 and value.endswith(suffix):
+            return value[: -len(suffix)]
+    return value
+
+
+def _tokenize_text(value: str) -> set[str]:
+    return {
+        _simple_stem(token)
+        for token in re.findall(r"[a-z0-9]+", (value or "").lower())
+        if token
+    }
+
+
+def score_candidate(candidate: dict, keywords: list[str], blocked_terms: list[str] | None = None) -> float:
+    """Score a candidate for keyword relevance and safety."""
+    blocked_terms = blocked_terms or []
+    title = str(candidate.get("title") or "")
+    description = str(candidate.get("description") or "")
+    tags = str(candidate.get("tags") or "")
+    haystack = f"{title} {description} {tags}".lower()
+    tokens = _tokenize_text(haystack)
+
+    if any(term in haystack for term in _REJECTED_CANDIDATE_TERMS):
+        return -1000.0
+
+    keyword_tokens = set()
+    phrase_hits = 0
+    for phrase in keywords:
+        phrase_l = str(phrase or "").strip().lower()
+        if not phrase_l:
+            continue
+        if phrase_l in haystack:
+            phrase_hits += 1
+        keyword_tokens.update(_tokenize_text(phrase_l))
+
+    overlap = len(tokens & keyword_tokens)
+    blocked_hits = sum(1 for term in blocked_terms if str(term).strip().lower() in haystack)
+    score = (overlap * 3.0) + (phrase_hits * 1.5) - (blocked_hits * 8.0)
+
+    width = int(candidate.get("width") or 0)
+    height = int(candidate.get("height") or 0)
+    if candidate.get("is_image"):
+        if width >= _PREFERRED_IMAGE_WIDTH:
+            score += 0.6
+    else:
+        if width >= 1920 and height >= 1080:
+            score += 0.8
+    return score
+
+
+def _candidate_meets_metadata_quality(candidate: dict) -> bool:
+    """Filter candidates with provider metadata before downloading."""
+    width = int(candidate.get("width") or 0)
+    height = int(candidate.get("height") or 0)
+    source = str(candidate.get("source") or "").lower()
+    is_image = bool(candidate.get("is_image"))
+
+    if is_image:
+        return width == 0 or width >= _MIN_IMAGE_WIDTH
+
+    if source == "archive_org" and height and height < _MIN_VIDEO_HEIGHT:
+        return False
+    if width and width < _MIN_VIDEO_WIDTH:
+        return False
+    if height and height < _MIN_VIDEO_HEIGHT:
+        return False
+    return True
+
+
+def _detect_crop_filter(path: str) -> str | None:
+    try:
+        cmd = [
+            "ffmpeg",
+            "-hide_banner",
+            "-i",
+            path,
+            "-vf",
+            "cropdetect=24:16:0",
+            "-frames:v",
+            "80",
+            "-f",
+            "null",
+            "-",
+        ]
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=45)
+        matches = re.findall(r"crop=\d+:\d+:\d+:\d+", (result.stderr or ""))
+        return matches[-1] if matches else None
+    except Exception:
+        return None
+
+
+def _crop_black_borders(path: str, is_image: bool) -> None:
+    crop_filter = _detect_crop_filter(path)
+    if not crop_filter:
+        return
+    tmp_path = str(Path(path).with_suffix(".cropped" + Path(path).suffix))
+    try:
+        if is_image:
+            cmd = ["ffmpeg", "-y", "-i", path, "-vf", crop_filter, "-frames:v", "1", tmp_path]
+        else:
+            cmd = ["ffmpeg", "-y", "-i", path, "-vf", crop_filter, "-c:a", "copy", tmp_path]
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+        if result.returncode == 0 and Path(tmp_path).exists():
+            Path(tmp_path).replace(path)
+        else:
+            Path(tmp_path).unlink(missing_ok=True)
+    except Exception:
+        Path(tmp_path).unlink(missing_ok=True)
+
+
+def _post_download_quality_ok(path: str, candidate: dict) -> bool:
+    _crop_black_borders(path, bool(candidate.get("is_image")))
+    width, height = _get_video_dimensions(path)
+    if width <= 0 or height <= 0:
+        return False
+    if candidate.get("is_image"):
+        return width >= _MIN_IMAGE_WIDTH
+    return width >= _MIN_VIDEO_WIDTH and height >= _MIN_VIDEO_HEIGHT
+
+
 def _scene_search_keywords(scene: ScriptScene, niche_context: str | None = None) -> list[str]:
     supplied = []
     for keyword in scene.visual_keywords:
@@ -993,6 +1132,7 @@ async def fetch_footage_for_shot(
     client: httpx.AsyncClient,
     used_urls: set[str],
     source_priority: list[str] | None = None,
+    blocked_terms: list[str] | None = None,
     device_id: str | None = None,
 ) -> str:
     """Fetch one validated horizontal asset using the niche's source priority."""
@@ -1024,6 +1164,7 @@ async def fetch_footage_for_shot(
         searcher = searchers.get(source)
         if not searcher:
             continue
+        provider_pool: list[dict] = []
         page_numbers = range(1, 4) if source in paginated_sources else (1,)
         for page_number in page_numbers:
             attempts_made += 1
@@ -1033,35 +1174,44 @@ async def fetch_footage_for_shot(
                 print(f"[Footage] Source '{source}' unavailable ({type(exc).__name__}).")
                 continue
 
-            # Never fall back to an asset already used elsewhere in this video.
-            unused_candidates = [
-                candidate for candidate in candidates
-                if candidate.get("download_url")
-                and not (_candidate_usage_keys(candidate) & used_urls)
-            ]
-            for candidate in unused_candidates:
-                target_path = output_path
-                if candidate.get("is_image", False) and not target_path.lower().endswith((".jpg", ".jpeg", ".png", ".webp")):
-                    target_path = str(Path(output_path).with_suffix(".jpg"))
-                try:
-                    await _download_video(candidate["download_url"], target_path, client)
-                    if not _is_landscape(target_path):
-                        print(f"[Footage] Rejected non-landscape or unprobeable asset from '{source}'.")
-                        Path(target_path).unlink(missing_ok=True)
-                        continue
-                    chosen = candidate
-                    final_output_path = target_path
-                    used_urls.update(_candidate_usage_keys(candidate))
-                    print(
-                        f"[Footage] Selected '{source}' "
-                        f"({'IMAGE' if candidate.get('is_image') else 'VIDEO'}) for keywords={keywords}"
-                    )
+            for candidate in candidates:
+                if not candidate.get("download_url"):
+                    continue
+                if _candidate_usage_keys(candidate) & used_urls:
+                    continue
+                if not _candidate_meets_metadata_quality(candidate):
+                    continue
+                candidate["_score"] = score_candidate(candidate, keywords, blocked_terms)
+                if candidate["_score"] < _MIN_RELEVANCE_SCORE:
+                    continue
+                provider_pool.append(candidate)
+                if len(provider_pool) >= 8:
                     break
-                except Exception as download_error:
-                    print(f"[Footage] Candidate from '{source}' failed ({type(download_error).__name__}); trying next.")
-                    Path(target_path).unlink(missing_ok=True)
-            if chosen:
+            if len(provider_pool) >= 8:
                 break
+
+        provider_pool.sort(key=lambda item: float(item.get("_score", 0.0)), reverse=True)
+        for candidate in provider_pool:
+            target_path = output_path
+            if candidate.get("is_image", False) and not target_path.lower().endswith((".jpg", ".jpeg", ".png", ".webp")):
+                target_path = str(Path(output_path).with_suffix(".jpg"))
+            try:
+                await _download_video(candidate["download_url"], target_path, client)
+                if not _is_landscape(target_path) or not _post_download_quality_ok(target_path, candidate):
+                    print(f"[Footage] Rejected low-quality asset from '{source}'.")
+                    Path(target_path).unlink(missing_ok=True)
+                    continue
+                chosen = candidate
+                final_output_path = target_path
+                used_urls.update(_candidate_usage_keys(candidate))
+                print(
+                    f"[Footage] Selected '{source}' "
+                    f"({'IMAGE' if candidate.get('is_image') else 'VIDEO'}) for keywords={keywords}"
+                )
+                break
+            except Exception as download_error:
+                print(f"[Footage] Candidate from '{source}' failed ({type(download_error).__name__}); trying next.")
+                Path(target_path).unlink(missing_ok=True)
         if chosen:
             break
 
@@ -1111,12 +1261,14 @@ async def fetch_all_footage(
     used_urls: set[str] = set()
     resolved_priority = source_priority
     niche_context = niche_id or ""
+    blocked_terms: list[str] = []
     if resolved_priority is None and niche_id:
         from app.niches import find_niche_info
         niche_info = find_niche_info(niche_id)
         if niche_info:
             resolved_priority = [item.strip() for item in niche_info.get("sources", "").split(",") if item.strip()]
             niche_context = str(niche_info.get("title") or niche_id)
+            blocked_terms = [str(term).strip().lower() for term in niche_info.get("blocked_terms", []) if str(term).strip()]
         else:
             resolved_priority = ["pexels_video", "pixabay_video", "pexels_image", "pixabay_image"]
 
@@ -1143,16 +1295,33 @@ async def fetch_all_footage(
                     # Rotate or modify keywords slightly for different shots
                     kw = kw[shot_idx % len(kw):] + kw[:shot_idx % len(kw)]
 
-                resolved_output = await fetch_footage_for_shot(
-                    keywords=kw,
-                    min_duration=shot_target_dur,
-                    output_path=output,
-                    attr_path=attr,
-                    client=client,
-                    used_urls=used_urls,
-                    source_priority=resolved_priority,
-                    device_id=device_id,
-                )
+                fallback_keywords = ["stars", "galaxy", "nebula"] if niche_id and "space" in niche_id.lower() else []
+                try:
+                    resolved_output = await fetch_footage_for_shot(
+                        keywords=kw,
+                        min_duration=shot_target_dur,
+                        output_path=output,
+                        attr_path=attr,
+                        client=client,
+                        used_urls=used_urls,
+                        source_priority=resolved_priority,
+                        blocked_terms=blocked_terms,
+                        device_id=device_id,
+                    )
+                except RuntimeError:
+                    if not fallback_keywords:
+                        raise
+                    resolved_output = await fetch_footage_for_shot(
+                        keywords=fallback_keywords,
+                        min_duration=shot_target_dur,
+                        output_path=output,
+                        attr_path=attr,
+                        client=client,
+                        used_urls=used_urls,
+                        source_priority=resolved_priority,
+                        blocked_terms=blocked_terms,
+                        device_id=device_id,
+                    )
                 scene_clip_paths.append(resolved_output)
 
                 if shot_idx < num_shots - 1:
