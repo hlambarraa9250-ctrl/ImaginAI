@@ -6,6 +6,7 @@ for all timing throughout the pipeline.
 """
 
 import json
+import re
 import traceback
 import subprocess
 from pathlib import Path
@@ -118,6 +119,17 @@ TARGET_DURATION_SECONDS = {
 }
 
 
+def _summarize_script_for_expansion(narrations: list[str]) -> str:
+    text = " ".join(item.strip() for item in narrations if item and item.strip())
+    if not text:
+        return ""
+    parts = [part.strip() for part in re.split(r"[.!?؟]+", text) if part.strip()]
+    if parts:
+        return ". ".join(parts[:3])
+    words = text.split()
+    return " ".join(words[:45]).strip()
+
+
 async def run_pipeline(
     job_id: str,
     idea: str,
@@ -142,10 +154,14 @@ async def run_pipeline(
 
     try:
         target_seconds = TARGET_DURATION_SECONDS.get(duration, 300.0)
+        is_user_provided_script = (
+            input_mode in ("script_provided", "script")
+            and bool(provided_script and provided_script.strip())
+        )
 
         # ── Stage 1: Script ──────────────────────────────────────────────
         _set_stage(job_id, "script", "processing")
-        if input_mode in ("script_provided", "script") and provided_script and provided_script.strip():
+        if is_user_provided_script:
             print(f"[Pipeline] User provided custom script ({len(provided_script)} chars). Skipping Gemini script generation.")
             from app.models import GeneratedScript, ScriptScene
             
@@ -165,6 +181,21 @@ async def run_pipeline(
 
             if not scenes:
                 scenes = [ScriptScene(narration=provided_script.strip(), visual_keywords=["cinematic", style], estimated_seconds=10.0)]
+
+            try:
+                from app.services.gemini_script import generate_visual_keywords
+                generated_keywords = await generate_visual_keywords(
+                    scenes,
+                    niche_id=niche_id,
+                    style=style,
+                    device_id=device_id,
+                )
+                for idx, scene in enumerate(scenes):
+                    keywords = generated_keywords[idx] if idx < len(generated_keywords) else []
+                    if keywords:
+                        scene.visual_keywords = keywords
+            except Exception as keyword_err:
+                print(f"[Pipeline WARNING] Visual keyword generation failed for provided script: {keyword_err}")
 
             script = GeneratedScript(scenes=scenes)
             script_file = job_dir / "script.json"
@@ -219,6 +250,8 @@ async def run_pipeline(
                     "custom_niche_description": custom_niche_description,
                     "niche_sources": niche_sources,
                     "caption_config": caption_config,
+                    "input_mode": input_mode,
+                    "provided_script": bool(is_user_provided_script),
                 }
                 (job_dir / "pipeline_state.json").write_text(
                     json.dumps(pipeline_state, ensure_ascii=False, indent=2), encoding="utf-8"
@@ -253,7 +286,11 @@ async def run_pipeline(
         attempt = 0
         max_expansion_attempts = 5
 
-        while total_audio_dur < target_seconds and attempt < max_expansion_attempts:
+        while (
+            not is_user_provided_script
+            and total_audio_dur < target_seconds
+            and attempt < max_expansion_attempts
+        ):
             attempt += 1
             gap_seconds = target_seconds - total_audio_dur
             print(
@@ -261,6 +298,7 @@ async def run_pipeline(
                 f"Audio duration ({total_audio_dur:.1f}s) < target ({target_seconds}s). Gap: {gap_seconds:.1f}s. Expanding script..."
             )
             from app.services.gemini_script import expand_script_scenes
+            narrations_so_far = [(scene.narration or "").strip() for scene in script.scenes if (scene.narration or "").strip()]
             new_scenes = await expand_script_scenes(
                 idea=idea,
                 needed_seconds=gap_seconds,
@@ -269,6 +307,8 @@ async def run_pipeline(
                 job_dir=job_dir,
                 niche_id=niche_id,
                 device_id=device_id,
+                recent_narrations=narrations_so_far[-6:],
+                script_summary=_summarize_script_for_expansion(narrations_so_far),
             )
 
             if not new_scenes:
@@ -289,7 +329,7 @@ async def run_pipeline(
             total_audio_dur = sum(audio_durations)
             print(f"[Pipeline Duration Loop] After expansion #{attempt}: Total duration = {total_audio_dur:.1f}s / {target_seconds}s")
 
-        if total_audio_dur < target_seconds:
+        if not is_user_provided_script and total_audio_dur < target_seconds:
             err_msg = (
                 f"تعذر الوصول للمدة المطلوبة ({target_seconds/60:.0f} دقائق) بعد 5 محاولات إضافة مشاهد. "
                 f"المدة الفعلية المحققة: {total_audio_dur/60:.1f} دقيقة."
@@ -681,6 +721,7 @@ async def _approve_sections_and_resume_impl(job_id: str, apply_sections: bool) -
     custom_niche = state.get("custom_niche")
     niche_sources = state.get("niche_sources")
     caption_config = state.get("caption_config")
+    is_user_provided_script = bool(state.get("provided_script")) or state.get("input_mode") in ("script_provided", "script")
 
     # ── Stage 2: TTS ─────────────────────────────────────────────────
     _set_stage(job_id, "tts", "processing")
@@ -689,6 +730,8 @@ async def _approve_sections_and_resume_impl(job_id: str, apply_sections: bool) -
             script.scenes, job_dir, voice=voice, provider=voice_provider, device_id=device_id
     )
     audio_durations = [get_audio_duration_ffprobe(p) for p in audio_paths]
+    if is_user_provided_script:
+        print(f"[Pipeline] Skipping duration expansion for user-provided script (job_id: {job_id}).")
 
     # ── Stage 3: Footage ─────────────────────────────────────────────
     _set_stage(job_id, "footage", "processing")
@@ -759,6 +802,3 @@ async def _approve_sections_and_resume_impl(job_id: str, apply_sections: bool) -
         current_stage="pending_review",
     )
     print(f"[Pipeline] Paused for user review (job_id: {job_id})")
-
-
-

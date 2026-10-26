@@ -11,7 +11,7 @@
 
 ## Checklist
 - [x] 1 Niche footage sources
-- [ ] 2 Own-script mode
+- [x] 2 Own-script mode
 - [ ] 3 Footage relevance and quality
 - [ ] 4 Section titles
 - [ ] 5 Custom and default fonts

@@ -5,6 +5,7 @@ Generates a structured JSON script from a user's idea based on duration and styl
 
 import asyncio
 import json
+import re
 from pathlib import Path
 
 from google import genai  # type: ignore
@@ -269,6 +270,8 @@ async def expand_script_scenes(
     job_dir: Path = Path("."),
     niche_id: str | None = None,
     device_id: str | None = None,
+    recent_narrations: list[str] | None = None,
+    script_summary: str | None = None,
 ) -> list[ScriptScene]:
     """Generate additional scenes to cover remaining needed seconds without rewriting existing script."""
     needed_words = max(150, int((needed_seconds / 60.0) * 150))
@@ -297,7 +300,18 @@ Rules:
     raw = None
     last_error = None
 
-    prompt = f"Topic/Idea: {idea}\n\nPlease generate additional scenes to extend the narration for another {needed_seconds:.0f} seconds."
+    prompt_parts = [
+        f"Topic/Idea: {idea}",
+        f"Please generate additional scenes to extend the narration for another {needed_seconds:.0f} seconds.",
+    ]
+    cleaned_recent = [item.strip() for item in (recent_narrations or []) if item and item.strip()]
+    if cleaned_recent:
+        prompt_parts.append(
+            "Recent scene narrations (last 6):\n- " + "\n- ".join(cleaned_recent[-6:])
+        )
+    if script_summary and script_summary.strip():
+        prompt_parts.append(f"Three-sentence summary so far:\n{script_summary.strip()}")
+    prompt = "\n\n".join(prompt_parts)
 
     for idx, key in enumerate(keys):
         try:
@@ -330,3 +344,112 @@ Rules:
     new_scenes = [ScriptScene(**s) for s in data["scenes"]]
     print(f"[Script Expansion] Added {len(new_scenes)} extra scenes for {needed_seconds:.1f}s gap")
     return new_scenes
+
+
+async def generate_visual_keywords(
+    scenes: list[ScriptScene],
+    niche_id: str | None = None,
+    style: str = "documentary",
+    device_id: str | None = None,
+) -> list[list[str]]:
+    """
+    Generate concrete English visual-search phrases for provided script scenes.
+    Returns one keyword-list per scene (same order as input).
+    """
+    if not scenes:
+        return []
+
+    style_instruction = STYLE_PROMPTS.get(style, STYLE_PROMPTS["documentary"])
+    niche_instruction = ""
+    if niche_id:
+        from app.niches import find_niche_info
+        niche_info = find_niche_info(niche_id)
+        if niche_info:
+            niche_instruction = (
+                f"\nNiche: {niche_info.get('title', niche_id)}"
+                f"\nNiche rules: {niche_info.get('script_style', '')}"
+            )
+
+    schema = {
+        "type": "object",
+        "properties": {
+            "items": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "index": {"type": "integer"},
+                        "keywords": {"type": "array", "items": {"type": "string"}},
+                    },
+                    "required": ["index", "keywords"],
+                },
+            }
+        },
+        "required": ["items"],
+    }
+
+    scene_payload = [
+        {"index": idx, "narration": scene.narration}
+        for idx, scene in enumerate(scenes)
+    ]
+    prompt = (
+        "Return strict JSON with key 'items'. "
+        "For each scene, return {index, keywords} where keywords has 2-4 concrete English search phrases "
+        "that match the scene visuals. Avoid abstract/general words like cinematic, documentary, inspiration, background."
+        f"\n{style_instruction}{niche_instruction}\n\n"
+        f"Scenes:\n{json.dumps(scene_payload, ensure_ascii=False)}"
+    )
+
+    keys = get_gemini_keys(device_id=device_id)
+    raw = None
+    last_error = None
+
+    for idx, key in enumerate(keys):
+        try:
+            print(f"[Gemini Keywords] Trying API key {idx + 1}/{len(keys)}...")
+            client = genai.Client(api_key=key)
+
+            async def _call():
+                response = await asyncio.to_thread(
+                    client.models.generate_content,
+                    model=GEMINI_SCRIPT_MODEL,
+                    contents=prompt,
+                    config=types.GenerateContentConfig(
+                        response_mime_type="application/json",
+                        response_schema=schema,
+                        temperature=0.2,
+                    ),
+                )
+                return response.text
+
+            raw = await _retry_async(_call)
+            if raw:
+                break
+        except Exception as err:
+            last_error = err
+            if not _is_rate_limited(err):
+                raise RuntimeError(f"Gemini visual keyword generation failed: {err}") from err
+            print(f"[Gemini Keywords WARNING] Key {idx + 1} is rate limited. Trying bounded failover...")
+
+    if not raw:
+        raise RuntimeError(f"All Gemini API keys failed for visual keywords! Last error: {last_error}")
+
+    data = json.loads(raw)
+    items = data.get("items", [])
+    result: list[list[str]] = [[] for _ in scenes]
+    for item in items:
+        index = item.get("index")
+        if not isinstance(index, int) or not (0 <= index < len(scenes)):
+            continue
+        keywords = []
+        for kw in item.get("keywords", []):
+            normalized = re.sub(r"\s+", " ", str(kw)).strip()
+            if normalized:
+                keywords.append(normalized)
+        deduped: list[str] = []
+        for kw in keywords:
+            if kw.lower() not in {k.lower() for k in deduped}:
+                deduped.append(kw)
+        result[index] = deduped[:4]
+
+    return result
