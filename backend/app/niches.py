@@ -552,6 +552,64 @@ def get_all_niches() -> List[Dict[str, Any]]:
     return DOMAINS_DATA
 
 
+_STOCK_SOURCES = ["pexels_video", "pixabay_video", "pexels_image", "pixabay_image"]
+_NON_WAR_BLOCKED_TERMS = [
+    "weapon",
+    "gun",
+    "rifle",
+    "soldier",
+    "army",
+    "military",
+    "bomb",
+    "war",
+]
+_NICHE_SOURCES: Dict[str, List[str]] = {
+    "horror_stories": list(_STOCK_SOURCES),
+    "true_crime": list(_STOCK_SOURCES),
+    "strange_phenomena": list(_STOCK_SOURCES),
+    "abandoned_places": ["wikimedia", "archive_org", "loc", "nara", *_STOCK_SOURCES],
+    "conspiracy_theories": list(_STOCK_SOURCES),
+    "history": ["archive_org", "loc", "wikimedia", "nara", *_STOCK_SOURCES],
+    "many_in_one": list(_STOCK_SOURCES),
+    "religions_philosophy": list(_STOCK_SOURCES),
+    "quick_facts": list(_STOCK_SOURCES),
+    "what_if_scientific": list(_STOCK_SOURCES),
+    "what_if_you_were": list(_STOCK_SOURCES),
+    "strange_creatures_animals": list(_STOCK_SOURCES),
+    "space": ["nasa", *_STOCK_SOURCES],
+    "oceans": list(_STOCK_SOURCES),
+    "inspiring_biographies": ["wikimedia", "archive_org", "loc", "nara", *_STOCK_SOURCES],
+    "charisma": list(_STOCK_SOURCES),
+    "applied_psychology": list(_STOCK_SOURCES),
+    "motivational": list(_STOCK_SOURCES),
+    "study_techniques": list(_STOCK_SOURCES),
+    "company_building": list(_STOCK_SOURCES),
+    "company_collapses": list(_STOCK_SOURCES),
+    "top_10": list(_STOCK_SOURCES),
+}
+
+
+def _is_war_niche_text(text: str) -> bool:
+    text_l = (text or "").lower()
+    return any(
+        token in text_l
+        for token in (
+            "war",
+            "military",
+            "battle",
+            "conflict",
+            "combat",
+            "army",
+            "rifle",
+            "bomb",
+            "حرب",
+            "حروب",
+            "عسكر",
+            "معرك",
+        )
+    )
+
+
 def find_niche_info(niche_id: str) -> Dict[str, Any] | None:
     """Find a catalog niche by its stable ID or title.
 
@@ -572,19 +630,11 @@ def find_niche_info(niche_id: str) -> Dict[str, Any] | None:
     if not niche_data:
         return None
 
-    text = f"{niche_id} {niche_data.get('title', '')} {domain_title}".lower()
-    configured_sources = [
-        item.strip()
-        for item in str(niche_data.get("sources", "")).split(",")
-        if item.strip()
-    ]
-    if any(word in text for word in ("history", "historical", "military", "biograph", "تاريخ", "حروب", "شخصيات")):
-        preferred_sources = ["archive_org", "loc", "wikimedia", "nara"]
-    elif any(word in text for word in ("space", "science", "astronomy", "nasa", "فضاء", "علوم", "فلك")):
-        preferred_sources = ["nasa", "wikimedia", "archive_org"]
-    else:
-        preferred_sources = ["wikimedia", "archive_org", "loc"]
-    niche_data["sources"] = ", ".join(dict.fromkeys(preferred_sources + configured_sources + ["coverr_video"]))
+    configured_sources = _NICHE_SOURCES.get(niche_data.get("id") or niche_id, _STOCK_SOURCES)
+    niche_data["sources"] = ", ".join(dict.fromkeys(configured_sources))
+    if "blocked_terms" not in niche_data:
+        text = f"{niche_id} {niche_data.get('title', '')} {domain_title}"
+        niche_data["blocked_terms"] = [] if _is_war_niche_text(text) else list(_NON_WAR_BLOCKED_TERMS)
     niche_data["domain_title"] = domain_title
 
     # Automatically set section_overlay_type if not explicitly set
@@ -594,4 +644,3 @@ def find_niche_info(niche_id: str) -> Dict[str, Any] | None:
             niche_data["section_overlay_type"] = found_overlay
 
     return niche_data
-

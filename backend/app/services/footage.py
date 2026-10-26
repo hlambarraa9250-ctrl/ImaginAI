@@ -488,12 +488,8 @@ def _scene_search_keywords(scene: ScriptScene, niche_context: str | None = None)
 
 
 def _prioritize_sources(sources: list[str]) -> list[str]:
-    """Try configured public/archive sources before commercial stock providers."""
-    stock_sources = {"pexels_video", "pixabay_video", "pexels_image", "pixabay_image"}
-    unique_sources = list(dict.fromkeys(sources))
-    return [source for source in unique_sources if source not in stock_sources] + [
-        source for source in unique_sources if source in stock_sources
-    ]
+    """Keep the configured provider order while removing duplicates."""
+    return list(dict.fromkeys(sources))
 
 
 async def _search_coverr(
@@ -1017,8 +1013,7 @@ async def fetch_footage_for_shot(
         "archive_org", "loc", "wikimedia", "nasa", "nara",
         "pixabay_video", "pexels_video", "pixabay_image", "pexels_image",
     ])
-    # Preserve the user's ordering among archival/public sources, while using
-    # commercial stock providers only after those sources have been tried.
+    # Respect configured source order exactly.
     priority = _prioritize_sources(priority)
     chosen = None
     final_output_path = output_path
@@ -1122,6 +1117,8 @@ async def fetch_all_footage(
         if niche_info:
             resolved_priority = [item.strip() for item in niche_info.get("sources", "").split(",") if item.strip()]
             niche_context = str(niche_info.get("title") or niche_id)
+        else:
+            resolved_priority = ["pexels_video", "pixabay_video", "pexels_image", "pixabay_image"]
 
     async with create_outbound_client() as client:
         for scene_idx, scene in enumerate(scenes):
