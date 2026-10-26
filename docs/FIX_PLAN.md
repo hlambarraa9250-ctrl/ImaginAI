@@ -10,7 +10,7 @@
 - Out of scope now: background music, thumbnails, post-generation editor, AI-generated clips, videos longer than 15 min, per-niche caption presets, reference-video style.
 
 ## Checklist
-- [ ] 1 Niche footage sources
+- [x] 1 Niche footage sources
 - [ ] 2 Own-script mode
 - [ ] 3 Footage relevance and quality
 - [ ] 4 Section titles
