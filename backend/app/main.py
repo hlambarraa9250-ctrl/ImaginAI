@@ -1,6 +1,7 @@
 import json
 import uuid
 import shutil
+from io import BytesIO
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
@@ -8,6 +9,7 @@ from typing import Optional
 from fastapi import FastAPI, BackgroundTasks, HTTPException, Query, Request, Response, Header, Depends, UploadFile, Form
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
+from fontTools.ttLib import TTFont, TTLibError
 
 from app.config import (
     COVERR_ENABLED,
@@ -69,11 +71,31 @@ from app.services.http_client import create_outbound_client
 
 from contextlib import asynccontextmanager
 
+
+def _extract_font_family(font_content: bytes) -> str:
+    """Extract preferred family name (name ID 16, then 1) from a font file."""
+    with TTFont(BytesIO(font_content), recalcBBoxes=False, recalcTimestamp=False) as font:
+        name_table = font["name"]
+        for name_id in (16, 1):
+            for record in name_table.names:
+                if record.nameID != name_id:
+                    continue
+                family = record.toUnicode().strip()
+                if family:
+                    return family
+    raise ValueError("تعذر استخراج اسم عائلة الخط من الملف.")
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     init_db()
     if not shutil.which("ffmpeg") or not shutil.which("ffprobe"):
         raise RuntimeError("FFmpeg and ffprobe are required in the runtime.")
+    try:
+        from app.download_fonts import FONTS, FONTS_DIR, download_fonts
+        if any(not (FONTS_DIR / filename).is_file() for filename in FONTS):
+            download_fonts()
+    except Exception as e:
+        print(f"[Fonts] Warning: could not ensure bundled fonts are available: {e}")
     # Jobs cannot continue executing after a process restart. Mark only jobs
     # that were actively running as interrupted; review/approval states remain
     # resumable and are intentionally left untouched.
@@ -513,6 +535,10 @@ async def upload_custom_font_endpoint(
     content = await file.read()
     if not content or len(content) < 100:
         raise HTTPException(status_code=400, detail="ملف الخط فارغ أو غير صالح.")
+    try:
+        render_family = _extract_font_family(content)
+    except (TTLibError, KeyError, ValueError, UnicodeDecodeError):
+        raise HTTPException(status_code=400, detail="تعذر قراءة ملف الخط. يرجى رفع ملف خط صالح.") from None
 
     font_id = f"font_{uuid.uuid4().hex[:8]}"
     fonts_dir = STORAGE_DIR / device_id / "fonts"
@@ -524,6 +550,7 @@ async def upload_custom_font_endpoint(
         font_id=font_id,
         device_id=device_id,
         font_name=font_name.strip(),
+        render_family=render_family,
         file_path=str(font_file_path),
     )
 
@@ -1095,4 +1122,3 @@ async def approve_sections_endpoint(
     background_tasks.add_task(approve_sections_and_resume, job_id, req.apply_sections)
 
     return {"success": True, "message": "تمت معالجة قرار الأقسام واستئناف التوليد بنجاح!"}
-

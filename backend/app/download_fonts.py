@@ -10,9 +10,9 @@ FONTS_DIR = Path(__file__).resolve().parent.parent / "assets" / "fonts"
 FONTS_DIR.mkdir(parents=True, exist_ok=True)
 
 FONTS = {
-    "Cairo-Bold.ttf": "https://github.com/google/fonts/raw/main/ofl/cairo/static/Cairo-Bold.ttf",
-    "Almarai-Bold.ttf": "https://github.com/google/fonts/raw/main/ofl/almarai/Almarai-Bold.ttf",
-    "PlusJakartaSans-Bold.ttf": "https://github.com/google/fonts/raw/main/ofl/plusjakartasans/static/PlusJakartaSans-Bold.ttf",
+    "Cairo-Bold.ttf": "https://raw.githubusercontent.com/google/fonts/main/ofl/cairo/Cairo%5Bslnt%2Cwght%5D.ttf",
+    "Almarai-Bold.ttf": "https://raw.githubusercontent.com/google/fonts/main/ofl/almarai/Almarai-Bold.ttf",
+    "PlusJakartaSans-Bold.ttf": "https://raw.githubusercontent.com/google/fonts/main/ofl/plusjakartasans/static/PlusJakartaSans-Bold.ttf",
 }
 
 def download_fonts():
