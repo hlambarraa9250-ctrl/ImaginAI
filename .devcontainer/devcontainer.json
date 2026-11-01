@@ -1,0 +1,14 @@
+{
+  "name": "imaginAI",
+  "image": "mcr.microsoft.com/devcontainers/python:1-3.12-bookworm",
+  "features": {
+    "ghcr.io/devcontainers/features/node:1": { "version": "22" }
+  },
+  "hostRequirements": { "cpus": 4 },
+  "forwardPorts": [3000],
+  "portsAttributes": {
+    "3000": { "label": "imaginAI", "onAutoForward": "notify" }
+  },
+  "postCreateCommand": "bash scripts/codespace_setup.sh",
+  "postStartCommand": "bash scripts/codespace_start.sh"
+}
