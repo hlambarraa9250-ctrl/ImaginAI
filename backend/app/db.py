@@ -91,11 +91,18 @@ def init_db() -> None:
                 id TEXT PRIMARY KEY,
                 device_id TEXT NOT NULL,
                 font_name TEXT NOT NULL,
+                render_family TEXT,
                 file_path TEXT NOT NULL,
                 created_at TEXT NOT NULL,
                 FOREIGN KEY (device_id) REFERENCES devices (device_id) ON DELETE CASCADE
             )
         """)
+        custom_font_columns = {
+            row["name"]
+            for row in cursor.execute("PRAGMA table_info(custom_fonts)").fetchall()
+        }
+        if "render_family" not in custom_font_columns:
+            cursor.execute("ALTER TABLE custom_fonts ADD COLUMN render_family TEXT")
 
         # Encrypted, device-scoped provider keys for BYOK.
         cursor.execute("""
@@ -411,6 +418,7 @@ def create_custom_font(
     font_id: str,
     device_id: str,
     font_name: str,
+    render_family: str,
     file_path: str,
 ) -> Dict[str, Any]:
     """Store a custom font entry."""
@@ -419,16 +427,17 @@ def create_custom_font(
         cursor = conn.cursor()
         cursor.execute(
             """
-            INSERT INTO custom_fonts (id, device_id, font_name, file_path, created_at)
-            VALUES (?, ?, ?, ?, ?)
+            INSERT INTO custom_fonts (id, device_id, font_name, render_family, file_path, created_at)
+            VALUES (?, ?, ?, ?, ?, ?)
             """,
-            (font_id, device_id, font_name, file_path, now),
+            (font_id, device_id, font_name, render_family, file_path, now),
         )
         conn.commit()
     return {
         "id": font_id,
         "device_id": device_id,
         "font_name": font_name,
+        "render_family": render_family,
         "file_path": file_path,
         "created_at": now,
     }
@@ -456,5 +465,4 @@ def get_custom_font_by_id(font_id: str) -> Optional[Dict[str, Any]]:
         )
         row = cursor.fetchone()
         return dict(row) if row else None
-
 

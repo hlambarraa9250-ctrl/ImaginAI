@@ -14,7 +14,7 @@
 - [x] 2 Own-script mode
 - [x] 3 Footage relevance and quality
 - [ ] 4 Section titles
-- [ ] 5 Custom and default fonts
+- [x] 5 Custom and default fonts
 - [ ] 6 Caption timing and text
 - [ ] 7 Natural voice (audio tags)
 - [ ] 8 Leave and come back

@@ -13,10 +13,13 @@ Features:
 import asyncio
 import json
 import os
+import shutil
 import subprocess
 import wave
 import re
 from pathlib import Path
+
+from fontTools.ttLib import TTFont, TTLibError
 
 from app.config import STYLE_TRANSITION
 from app.models import ScriptScene
@@ -59,6 +62,83 @@ def _escape_drawtext(value: str) -> str:
     return str(value).replace("\\", "\\\\").replace("'", "\\'").replace(":", "\\:")
 
 
+def _extract_font_family_from_path(font_path: str | Path) -> str | None:
+    """Extract preferred font family (name ID 16, else 1) from a font file."""
+    try:
+        with TTFont(str(font_path), recalcBBoxes=False, recalcTimestamp=False) as font:
+            name_table = font["name"]
+            for name_id in (16, 1):
+                for record in name_table.names:
+                    if record.nameID != name_id:
+                        continue
+                    family = record.toUnicode().strip()
+                    if family:
+                        return family
+    except (OSError, TTLibError, KeyError, UnicodeDecodeError):
+        return None
+    return None
+
+
+def _resolve_font_name(font_raw: str) -> str:
+    if font_raw in ["Geist", "Plus_Jakarta_Sans", "Plus Jakarta Sans"]:
+        return "Plus Jakarta Sans"
+    if font_raw == "Almarai":
+        return "Almarai"
+    if font_raw == "Montserrat":
+        return "Montserrat"
+    if font_raw == "Poppins":
+        return "Poppins"
+    if font_raw.startswith("custom:"):
+        font_id = font_raw.split(":", 1)[1]
+        from app.db import get_custom_font_by_id
+        font_row = get_custom_font_by_id(font_id)
+        if font_row:
+            stored_family = str(font_row.get("render_family") or "").strip()
+            if stored_family:
+                return stored_family
+            extracted = _extract_font_family_from_path(str(font_row.get("file_path", "")))
+            if extracted:
+                return extracted
+            return (
+                str(font_row.get("font_name") or "").strip()
+                or "Cairo"
+            )
+        return "Cairo"
+    return font_raw or "Cairo"
+
+
+def _build_ass_filter(ass_path: str, fonts_dir: str | None = None) -> str:
+    ass_escaped = ass_path.replace("\\", "/").replace(":", "\\:")
+    if fonts_dir:
+        fonts_dir_escaped = str(fonts_dir).replace("\\", "/").replace(":", "\\:")
+        return f"ass='{ass_escaped}':fontsdir='{fonts_dir_escaped}'"
+    return f"ass='{ass_escaped}'"
+
+
+def _prepare_job_fonts_dir(temp_dir: Path, caption_config: dict | None = None) -> Path:
+    job_fonts_dir = temp_dir / "fonts"
+    if job_fonts_dir.exists():
+        shutil.rmtree(job_fonts_dir, ignore_errors=True)
+    job_fonts_dir.mkdir(parents=True, exist_ok=True)
+
+    default_fonts_dir = Path(__file__).resolve().parent.parent.parent / "assets" / "fonts"
+    if default_fonts_dir.exists():
+        for font_file in default_fonts_dir.glob("*.ttf"):
+            shutil.copy2(font_file, job_fonts_dir / font_file.name)
+
+    font_raw = (caption_config or {}).get("font", "")
+    if font_raw.startswith("custom:"):
+        font_id = font_raw.split(":", 1)[1]
+        from app.db import get_custom_font_by_id
+        font_row = get_custom_font_by_id(font_id)
+        if font_row:
+            custom_path = Path(str(font_row.get("file_path", "")))
+            if custom_path.is_file():
+                shutil.copy2(custom_path, job_fonts_dir / custom_path.name)
+
+    return job_fonts_dir
+
+
 def _generate_ass_subtitles(
     caption_lines: list[dict], output_path: str, caption_config: dict | None = None
 ) -> str:
@@ -71,24 +151,7 @@ def _generate_ass_subtitles(
 
     # Font
     font_raw = cfg.get("font", "Cairo")
-    if font_raw in ["Geist", "Plus_Jakarta_Sans", "Plus Jakarta Sans"]:
-        fontname = "Plus Jakarta Sans"
-    elif font_raw == "Almarai":
-        fontname = "Almarai"
-    elif font_raw == "Montserrat":
-        fontname = "Montserrat"
-    elif font_raw == "Poppins":
-        fontname = "Poppins"
-    elif font_raw.startswith("custom:"):
-        font_id = font_raw.split(":", 1)[1]
-        from app.db import get_custom_font_by_id
-        font_row = get_custom_font_by_id(font_id)
-        if font_row:
-            fontname = font_row["font_name"]
-        else:
-            fontname = "Cairo"
-    else:
-        fontname = font_raw or "Cairo"
+    fontname = _resolve_font_name(str(font_raw))
     fontname = re.sub(r"[^A-Za-z0-9\u0600-\u06FF _-]", "", str(fontname))[:80] or "Cairo"
 
     # Size
@@ -299,6 +362,7 @@ async def _render_scene(
     style: str,
     output_path: str,
     temp_dir: Path,
+    job_fonts_dir: Path | None = None,
     caption_config: dict | None = None,
     scene_obj: ScriptScene | None = None,
     overlay_type: str | None = None,
@@ -352,7 +416,6 @@ async def _render_scene(
     if captions_enabled:
         ass_path = str(temp_dir / f"scene_{scene_idx}.ass")
         _generate_ass_subtitles(caption_lines, ass_path, caption_config)
-        ass_escaped = ass_path.replace("\\", "/").replace(":", "\\:")
 
     # 4. Build video filter graph (subtitles + Section Overlay / Listicle badge)
     video_filters = []
@@ -400,26 +463,7 @@ async def _render_scene(
 
     # Subtitles filter
     if captions_enabled:
-        fonts_dirs = []
-        default_fonts_dir = Path(__file__).resolve().parent.parent.parent / "assets" / "fonts"
-        if default_fonts_dir.exists():
-            fonts_dirs.append(str(default_fonts_dir).replace("\\", "/").replace(":", "\\:"))
-
-        font_raw = (caption_config or {}).get("font", "")
-        if font_raw.startswith("custom:"):
-            font_id = font_raw.split(":", 1)[1]
-            from app.db import get_custom_font_by_id
-            font_row = get_custom_font_by_id(font_id)
-            if font_row and Path(font_row["file_path"]).exists():
-                custom_dir = str(Path(font_row["file_path"]).parent).replace("\\", "/").replace(":", "\\:")
-                if custom_dir not in fonts_dirs:
-                    fonts_dirs.append(custom_dir)
-
-        if fonts_dirs:
-            fonts_dir_param = ":".join(fonts_dirs)
-            video_filters.append(f"ass='{ass_escaped}':fontsdir='{fonts_dir_param}'")
-        else:
-            video_filters.append(f"ass='{ass_escaped}'")
+        video_filters.append(_build_ass_filter(ass_path, str(job_fonts_dir) if job_fonts_dir else None))
 
     vf_args = ["-vf", ",".join(video_filters)] if video_filters else []
 
@@ -466,6 +510,7 @@ async def render_video(
     temp_dir.mkdir(exist_ok=True)
 
     captions_enabled = (caption_config or {}).get("enabled", True) is not False
+    job_fonts_dir: Path | None = None
     if not (len(scenes) == len(audio_paths) == len(audio_durations) == len(shots_per_scene) == len(caption_data)):
         raise RuntimeError("Render prerequisites are incomplete: every scene needs audio and footage.")
     for idx, scene in enumerate(scenes):
@@ -475,6 +520,8 @@ async def render_video(
             raise RuntimeError(f"Render prerequisites are missing captions for scene {idx + 1}.")
         if not shots_per_scene[idx]:
             raise RuntimeError(f"Render prerequisites are missing footage for scene {idx + 1}.")
+    if captions_enabled:
+        job_fonts_dir = _prepare_job_fonts_dir(temp_dir, caption_config)
 
     scene_outputs = []
 
@@ -498,6 +545,7 @@ async def render_video(
             style=style,
             output_path=output,
             temp_dir=temp_dir,
+            job_fonts_dir=job_fonts_dir,
             caption_config=caption_config,
             scene_obj=scenes[i],
             overlay_type=overlay_type,
