@@ -27,3 +27,5 @@ testsprite_tests\tmp\config.json
 backend/storage/
 backend/data/imaginai.db
 backend/data/*_limits.json
+.logs/
+backend/.venv/
